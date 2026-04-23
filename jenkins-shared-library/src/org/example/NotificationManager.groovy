@@ -8,8 +8,6 @@ class NotificationManager implements Serializable {
         this.script = script
     }
 
-    // ── SLACK NOTIFICATION ────────────────────────────────────
-
     void sendSlack(String status, Map details) {
         try {
             String color   = getColor(status)
@@ -17,21 +15,18 @@ class NotificationManager implements Serializable {
             String message = buildSlackMessage(status, emoji, details)
 
             script.slackSend(
-                channel    : '#jenkins-notifications',
-                color      : color,
-                message    : message,
-                tokenCredentialId: 'slack-token'
+                channel          : '#jenkins-notifications',
+                color            : color,
+                message          : message,
+                tokenCredentialId: 'slackaditya'
             )
 
             script.echo "Slack notification sent: ${status}"
 
         } catch (Exception e) {
-            // graceful failure — notification fail hone se pipeline fail nahi hogi
             script.echo "WARNING: Slack notification failed: ${e.message}"
         }
     }
-
-    // ── EMAIL NOTIFICATION ────────────────────────────────────
 
     void sendEmail(String status, Map details) {
         try {
@@ -39,11 +34,11 @@ class NotificationManager implements Serializable {
             String body    = buildEmailBody(status, details)
 
             script.emailext(
-                subject     : subject,
-                body        : body,
-                mimeType    : 'text/html',
-                to          : details.recipients ?: 'YOUR_EMAIL@gmail.com',
-                attachLog   : status == 'FAILURE'   // failure pe log attach karo
+                subject  : subject,
+                body     : body,
+                mimeType : 'text/html',
+                to       : details.recipients ?: 'YOUR_EMAIL@gmail.com',
+                attachLog: status == 'FAILURE'
             )
 
             script.echo "Email notification sent: ${status}"
@@ -53,20 +48,14 @@ class NotificationManager implements Serializable {
         }
     }
 
-    // ── MS TEAMS NOTIFICATION ─────────────────────────────────
-
     void sendTeams(String status, Map details) {
         try {
             String color   = getTeamsColor(status)
             String emoji   = getEmoji(status)
             String message = buildTeamsMessage(status, emoji, details)
 
-            // Teams webhook call
             script.withCredentials([
-                script.string(
-                    credentialsId: 'teams-webhook',
-                    variable: 'TEAMS_URL'
-                )
+                script.string(credentialsId: 'teams-webhook', variable: 'TEAMS_URL')
             ]) {
                 script.sh("""
                     curl -s -X POST "\$TEAMS_URL" \
@@ -82,15 +71,11 @@ class NotificationManager implements Serializable {
         }
     }
 
-    // ── SEND ALL NOTIFICATIONS ────────────────────────────────
-
     void notifyAll(String status, Map details) {
         sendSlack(status, details)
         sendEmail(status, details)
         sendTeams(status, details)
     }
-
-    // ── PRIVATE — MESSAGE BUILDERS ────────────────────────────
 
     private String buildSlackMessage(String status, String emoji, Map d) {
         return """
@@ -106,8 +91,7 @@ ${emoji} *${status}: ${d.jobName} #${d.buildNumber}*
     }
 
     private String buildEmailSubject(String status, Map d) {
-        String emoji = getEmoji(status)
-        return "${emoji} ${status}: ${d.jobName} #${d.buildNumber} [${d.branch}]"
+        return "${getEmoji(status)} ${status}: ${d.jobName} #${d.buildNumber} [${d.branch}]"
     }
 
     private String buildEmailBody(String status, Map d) {
@@ -116,19 +100,10 @@ ${emoji} *${status}: ${d.jobName} #${d.buildNumber}*
 <!DOCTYPE html>
 <html>
 <body style="font-family: Arial, sans-serif; margin: 0; padding: 20px;">
-
-  <div style="background-color: ${color};
-              padding: 15px;
-              border-radius: 8px;
-              margin-bottom: 20px;">
-    <h2 style="color: white; margin: 0;">
-      ${getEmoji(status)} Build ${status}
-    </h2>
+  <div style="background-color: ${color}; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+    <h2 style="color: white; margin: 0;">${getEmoji(status)} Build ${status}</h2>
   </div>
-
-  <table style="width: 100%;
-                border-collapse: collapse;
-                margin-bottom: 20px;">
+  <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
     <tr style="background-color: #f2f2f2;">
       <td style="padding: 10px; border: 1px solid #ddd; font-weight: bold;">Job Name</td>
       <td style="padding: 10px; border: 1px solid #ddd;">${d.jobName}</td>
@@ -162,22 +137,10 @@ ${emoji} *${status}: ${d.jobName} #${d.buildNumber}*
       <td style="padding: 10px; border: 1px solid #ddd;">${d.changes}</td>
     </tr>
   </table>
-
   <div style="margin-bottom: 20px;">
-    <a href="${d.buildUrl}"
-       style="background-color: #0066cc;
-              color: white;
-              padding: 10px 20px;
-              text-decoration: none;
-              border-radius: 5px;">
-      View Build Logs
-    </a>
+    <a href="${d.buildUrl}" style="background-color: #0066cc; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Build Logs</a>
   </div>
-
-  <p style="color: #666; font-size: 12px;">
-    This is an automated notification from Jenkins CI/CD Pipeline.
-  </p>
-
+  <p style="color: #666; font-size: 12px;">This is an automated notification from Jenkins CI/CD Pipeline.</p>
 </body>
 </html>
         """.trim()
@@ -211,8 +174,6 @@ ${emoji} *${status}: ${d.jobName} #${d.buildNumber}*
 }
         """.trim()
     }
-
-    // ── PRIVATE — HELPERS ─────────────────────────────────────
 
     private String getColor(String status) {
         switch(status) {
