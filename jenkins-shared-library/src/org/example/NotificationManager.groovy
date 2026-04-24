@@ -8,6 +8,8 @@ class NotificationManager implements Serializable {
         this.script = script
     }
 
+    // ── SLACK NOTIFICATION ────────────────────────────────────
+
     void sendSlack(String status, Map details) {
         try {
             String color   = getColor(status)
@@ -27,6 +29,8 @@ class NotificationManager implements Serializable {
             script.echo "WARNING: Slack notification failed: ${e.message}"
         }
     }
+
+    // ── EMAIL NOTIFICATION ────────────────────────────────────
 
     void sendEmail(String status, Map details) {
         try {
@@ -48,6 +52,8 @@ class NotificationManager implements Serializable {
         }
     }
 
+    // ── MS TEAMS NOTIFICATION ─────────────────────────────────
+
     void sendTeams(String status, Map details) {
         try {
             String color   = getTeamsColor(status)
@@ -55,7 +61,10 @@ class NotificationManager implements Serializable {
             String message = buildTeamsMessage(status, emoji, details)
 
             script.withCredentials([
-                script.string(credentialsId: 'teams-webhook', variable: 'TEAMS_URL')
+                script.string(
+                    credentialsId: 'teams-webhook',
+                    variable     : 'TEAMS_URL'
+                )
             ]) {
                 script.sh("""
                     curl -s -X POST "\$TEAMS_URL" \
@@ -71,76 +80,164 @@ class NotificationManager implements Serializable {
         }
     }
 
+    // ── SEND ALL NOTIFICATIONS ────────────────────────────────
+
     void notifyAll(String status, Map details) {
         sendSlack(status, details)
         sendEmail(status, details)
         sendTeams(status, details)
     }
 
+    // ── PRIVATE — MESSAGE BUILDERS ────────────────────────────
+
     private String buildSlackMessage(String status, String emoji, Map d) {
+
+        // FIX: Safely read all URLs with null-safe fallback
+        String buildUrl     = d['buildUrl']     ?: 'http://localhost:8080'
+        String testsUrl     = d['testsUrl']     ?: "${buildUrl}testReport/"
+        String coverageUrl  = d['coverageUrl']  ?: "${buildUrl}coverage/"
+        String artifactsUrl = d['artifactsUrl'] ?: "${buildUrl}artifact/test-reports/test-report.pdf"
+
         return """
-${emoji} *${status}: ${d.jobName} #${d.buildNumber}*
-> *Branch*    : ${d.branch}
-> *Service*   : ${d.service}
-> *Version*   : ${d.version}
-> *Env*       : ${d.environment}
-> *Duration*  : ${d.duration}
-> *Changes*   : ${d.changes}
-> *Build URL* : ${d.buildUrl}
+${emoji} *${status}: ${d['jobName']} #${d['buildNumber']}*
+> *Branch*      : ${d['branch']}
+> *Service*     : ${d['service']}
+> *Version*     : ${d['version']}
+> *Env*         : ${d['environment']}
+> *Duration*    : ${d['duration']}
+> *Changes*     : ${d['changes']}
+
+*Quick Links:*
+> <${buildUrl}|🔗 View Build Page>
+> <${testsUrl}|📊 Test Results>
+> <${coverageUrl}|📈 Coverage Report>
+> <${artifactsUrl}|📄 Download PDF Report>
         """.trim()
     }
 
     private String buildEmailSubject(String status, Map d) {
-        return "${getEmoji(status)} ${status}: ${d.jobName} #${d.buildNumber} [${d.branch}]"
+        String emoji = getEmoji(status)
+        return "${emoji} ${status}: ${d['jobName']} #${d['buildNumber']} [${d['branch']}]"
     }
 
     private String buildEmailBody(String status, Map d) {
         String color = getHtmlColor(status)
+        String emoji = getEmoji(status)
+
+        // FIX: Safely read all URLs with null-safe fallback
+        String buildUrl     = d['buildUrl']     ?: 'http://localhost:8080'
+        String testsUrl     = d['testsUrl']     ?: "${buildUrl}testReport/"
+        String coverageUrl  = d['coverageUrl']  ?: "${buildUrl}coverage/"
+        String artifactsUrl = d['artifactsUrl'] ?: "${buildUrl}artifact/test-reports/test-report.pdf"
+
         return """
 <!DOCTYPE html>
 <html>
 <body style="font-family: Arial, sans-serif; margin: 0; padding: 20px;">
-  <div style="background-color: ${color}; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
-    <h2 style="color: white; margin: 0;">${getEmoji(status)} Build ${status}</h2>
+
+  <!-- Header -->
+  <div style="background-color: ${color};
+              padding: 15px;
+              border-radius: 8px;
+              margin-bottom: 20px;">
+    <h2 style="color: white; margin: 0;">
+      ${emoji} Build ${status}
+    </h2>
   </div>
-  <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
-    <tr style="background-color: #f2f2f2;">
-      <td style="padding: 10px; border: 1px solid #ddd; font-weight: bold;">Job Name</td>
-      <td style="padding: 10px; border: 1px solid #ddd;">${d.jobName}</td>
+
+  <!-- Build Details Table -->
+  <table style="width:100%;
+                border-collapse:collapse;
+                margin-bottom:20px;">
+    <tr style="background-color:#f2f2f2;">
+      <td style="padding:10px; border:1px solid #ddd; font-weight:bold; width:30%;">Job Name</td>
+      <td style="padding:10px; border:1px solid #ddd;">${d['jobName']}</td>
     </tr>
     <tr>
-      <td style="padding: 10px; border: 1px solid #ddd; font-weight: bold;">Build Number</td>
-      <td style="padding: 10px; border: 1px solid #ddd;">#${d.buildNumber}</td>
+      <td style="padding:10px; border:1px solid #ddd; font-weight:bold;">Build Number</td>
+      <td style="padding:10px; border:1px solid #ddd;">#${d['buildNumber']}</td>
     </tr>
-    <tr style="background-color: #f2f2f2;">
-      <td style="padding: 10px; border: 1px solid #ddd; font-weight: bold;">Branch</td>
-      <td style="padding: 10px; border: 1px solid #ddd;">${d.branch}</td>
-    </tr>
-    <tr>
-      <td style="padding: 10px; border: 1px solid #ddd; font-weight: bold;">Service</td>
-      <td style="padding: 10px; border: 1px solid #ddd;">${d.service}</td>
-    </tr>
-    <tr style="background-color: #f2f2f2;">
-      <td style="padding: 10px; border: 1px solid #ddd; font-weight: bold;">Version</td>
-      <td style="padding: 10px; border: 1px solid #ddd;">${d.version}</td>
+    <tr style="background-color:#f2f2f2;">
+      <td style="padding:10px; border:1px solid #ddd; font-weight:bold;">Branch</td>
+      <td style="padding:10px; border:1px solid #ddd;">${d['branch']}</td>
     </tr>
     <tr>
-      <td style="padding: 10px; border: 1px solid #ddd; font-weight: bold;">Environment</td>
-      <td style="padding: 10px; border: 1px solid #ddd;">${d.environment}</td>
+      <td style="padding:10px; border:1px solid #ddd; font-weight:bold;">Service</td>
+      <td style="padding:10px; border:1px solid #ddd;">${d['service']}</td>
     </tr>
-    <tr style="background-color: #f2f2f2;">
-      <td style="padding: 10px; border: 1px solid #ddd; font-weight: bold;">Duration</td>
-      <td style="padding: 10px; border: 1px solid #ddd;">${d.duration}</td>
+    <tr style="background-color:#f2f2f2;">
+      <td style="padding:10px; border:1px solid #ddd; font-weight:bold;">Version</td>
+      <td style="padding:10px; border:1px solid #ddd;">${d['version']}</td>
     </tr>
     <tr>
-      <td style="padding: 10px; border: 1px solid #ddd; font-weight: bold;">Changes</td>
-      <td style="padding: 10px; border: 1px solid #ddd;">${d.changes}</td>
+      <td style="padding:10px; border:1px solid #ddd; font-weight:bold;">Environment</td>
+      <td style="padding:10px; border:1px solid #ddd;">${d['environment']}</td>
+    </tr>
+    <tr style="background-color:#f2f2f2;">
+      <td style="padding:10px; border:1px solid #ddd; font-weight:bold;">Duration</td>
+      <td style="padding:10px; border:1px solid #ddd;">${d['duration']}</td>
+    </tr>
+    <tr>
+      <td style="padding:10px; border:1px solid #ddd; font-weight:bold;">Changes</td>
+      <td style="padding:10px; border:1px solid #ddd;">${d['changes']}</td>
     </tr>
   </table>
-  <div style="margin-bottom: 20px;">
-    <a href="${d.buildUrl}" style="background-color: #0066cc; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Build Logs</a>
-  </div>
-  <p style="color: #666; font-size: 12px;">This is an automated notification from Jenkins CI/CD Pipeline.</p>
+
+  <!-- 4 Action Buttons -->
+  <p style="font-weight:bold; margin-bottom:10px;">Quick Links:</p>
+  <table style="margin-bottom:20px;">
+    <tr>
+      <td style="padding:5px;">
+        <a href="${buildUrl}"
+           style="background-color:#0066cc;
+                  color:white;
+                  padding:10px 15px;
+                  text-decoration:none;
+                  border-radius:5px;
+                  display:inline-block;">
+          🔗 View Build
+        </a>
+      </td>
+      <td style="padding:5px;">
+        <a href="${testsUrl}"
+           style="background-color:#28a745;
+                  color:white;
+                  padding:10px 15px;
+                  text-decoration:none;
+                  border-radius:5px;
+                  display:inline-block;">
+          📊 Test Results
+        </a>
+      </td>
+      <td style="padding:5px;">
+        <a href="${coverageUrl}"
+           style="background-color:#6f42c1;
+                  color:white;
+                  padding:10px 15px;
+                  text-decoration:none;
+                  border-radius:5px;
+                  display:inline-block;">
+          📈 Coverage
+        </a>
+      </td>
+      <td style="padding:5px;">
+        <a href="${artifactsUrl}"
+           style="background-color:#fd7e14;
+                  color:white;
+                  padding:10px 15px;
+                  text-decoration:none;
+                  border-radius:5px;
+                  display:inline-block;">
+          📄 PDF Report
+        </a>
+      </td>
+    </tr>
+  </table>
+
+  <p style="color:#666; font-size:12px;">
+    This is an automated notification from Jenkins CI/CD Pipeline.
+  </p>
+
 </body>
 </html>
         """.trim()
@@ -148,32 +245,58 @@ ${emoji} *${status}: ${d.jobName} #${d.buildNumber}*
 
     private String buildTeamsMessage(String status, String emoji, Map d) {
         String color = getTeamsColor(status)
+
+        // FIX: Safely read all URLs with null-safe fallback
+        String buildUrl     = d['buildUrl']     ?: 'http://localhost:8080'
+        String testsUrl     = d['testsUrl']     ?: "${buildUrl}testReport/"
+        String coverageUrl  = d['coverageUrl']  ?: "${buildUrl}coverage/"
+        String artifactsUrl = d['artifactsUrl'] ?: "${buildUrl}artifact/test-reports/test-report.pdf"
+
         return """
 {
     "@type": "MessageCard",
     "@context": "http://schema.org/extensions",
     "themeColor": "${color}",
-    "summary": "${status}: ${d.jobName} #${d.buildNumber}",
+    "summary": "${status}: ${d['jobName']} #${d['buildNumber']}",
     "sections": [{
-        "activityTitle": "${emoji} **${status}: ${d.jobName}**",
-        "activitySubtitle": "Build #${d.buildNumber} | Branch: ${d.branch}",
+        "activityTitle": "${emoji} **${status}: ${d['jobName']}**",
+        "activitySubtitle": "Build #${d['buildNumber']} | Branch: ${d['branch']}",
         "facts": [
-            {"name": "Service",     "value": "${d.service}"},
-            {"name": "Version",     "value": "${d.version}"},
-            {"name": "Environment", "value": "${d.environment}"},
-            {"name": "Duration",    "value": "${d.duration}"},
-            {"name": "Changes",     "value": "${d.changes}"}
+            {"name": "Service",     "value": "${d['service']}"},
+            {"name": "Version",     "value": "${d['version']}"},
+            {"name": "Environment", "value": "${d['environment']}"},
+            {"name": "Duration",    "value": "${d['duration']}"},
+            {"name": "Changes",     "value": "${d['changes']}"}
         ],
         "markdown": true
     }],
-    "potentialAction": [{
-        "@type": "OpenUri",
-        "name": "View Build",
-        "targets": [{"os": "default", "uri": "${d.buildUrl}"}]
-    }]
+    "potentialAction": [
+        {
+            "@type": "OpenUri",
+            "name": "🔗 View Build",
+            "targets": [{"os": "default", "uri": "${buildUrl}"}]
+        },
+        {
+            "@type": "OpenUri",
+            "name": "📊 Test Results",
+            "targets": [{"os": "default", "uri": "${testsUrl}"}]
+        },
+        {
+            "@type": "OpenUri",
+            "name": "📈 Coverage Report",
+            "targets": [{"os": "default", "uri": "${coverageUrl}"}]
+        },
+        {
+            "@type": "OpenUri",
+            "name": "📄 PDF Report",
+            "targets": [{"os": "default", "uri": "${artifactsUrl}"}]
+        }
+    ]
 }
         """.trim()
     }
+
+    // ── PRIVATE — HELPERS ─────────────────────────────────────
 
     private String getColor(String status) {
         switch(status) {
@@ -205,13 +328,14 @@ ${emoji} *${status}: ${d.jobName} #${d.buildNumber}*
         }
     }
 
+    // FIX: Return actual emoji characters instead of plain text strings
     private String getEmoji(String status) {
         switch(status) {
-            case 'SUCCESS'  : return 'SUCCESS'
-            case 'FAILURE'  : return 'FAILED'
-            case 'UNSTABLE' : return 'UNSTABLE'
-            case 'STARTED'  : return 'STARTED'
-            default         : return 'INFO'
+            case 'SUCCESS'  : return '✅'
+            case 'FAILURE'  : return '❌'
+            case 'UNSTABLE' : return '⚠️'
+            case 'STARTED'  : return '🚀'
+            default         : return 'ℹ️'
         }
     }
 }
