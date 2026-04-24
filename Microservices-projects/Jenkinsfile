@@ -2,12 +2,11 @@
 
 import org.example.NotificationManager
 
-// ─────────────────────────────────────────────────────────────
-//  COMPLETE TESTING PIPELINE
-//  Stages: Unit → Integration → E2E (parallel where possible)
-//  Coverage: 80% threshold (JaCoCo / Cobertura / pytest-cov)
-//  Reports: JUnit XML → Jenkins + PDF → Slack
-// ─────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+//  COMPLETE TESTING PIPELINE — PRODUCTION READY
+//  Unit → Coverage → Parallel(Integration + Lint) → E2E
+//  Reports: JUnit + Coverage + PDF → Slack (with Quick Links)
+// ═══════════════════════════════════════════════════════════════
 
 pipeline {
     agent any
@@ -21,43 +20,54 @@ pipeline {
         string(
             name: 'VERSION',
             defaultValue: '1.0.0',
-            description: 'Version under test'
+            description: 'Version under test (semver e.g. 1.0.0)'
         )
         choice(
             name: 'TEST_SCOPE',
             choices: ['all', 'unit', 'integration', 'e2e'],
             description: 'Which tests to run'
         )
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['staging', 'dev', 'prod'],
+            description: 'Target environment for E2E tests'
+        )
         string(
             name: 'RECIPIENTS',
             defaultValue: 'YOUR_EMAIL@gmail.com',
-            description: 'Email recipients for report'
+            description: 'Email recipients (comma separated)'
         )
         booleanParam(
             name: 'FAIL_ON_COVERAGE',
             defaultValue: true,
-            description: 'Fail build if coverage < 60%?'
+            description: 'Fail build if coverage below threshold?'
         )
     }
 
     environment {
-        SERVICE       = "${params.SERVICE}"
-        VERSION       = "${params.VERSION}"
-        COVERAGE_MIN  = '60'
-        REPORT_DIR    = 'test-reports'
-        COVERAGE_DIR  = 'coverage-reports'
-        JUNIT_PATTERN = '**/test-results/**/*.xml'
-        KUBECONFIG    = '/var/lib/jenkins/.kube/config'
+        SERVICE         = "${params.SERVICE}"
+        VERSION         = "${params.VERSION}"
+        ENVIRONMENT     = "${params.ENVIRONMENT}"
+        COVERAGE_MIN    = '60'
+        REPORT_DIR      = 'test-reports'
+        COVERAGE_DIR    = 'coverage-reports'
+        JUNIT_PATTERN   = "${REPORT_DIR}/**/*.xml"
+        KUBECONFIG      = '/var/lib/jenkins/.kube/config'
+        SLACK_CHANNEL   = '#jenkins-notifications'
+        SLACK_CRED_ID   = 'slackaditya'
     }
 
     stages {
 
-        // ── STAGE 1: SETUP ─────────────────────────────────────
+        // ── STAGE 1: SETUP ──────────────────────────────────────
         stage('Setup') {
             steps {
                 script {
-                    echo "=== TEST PIPELINE: ${SERVICE} v${VERSION} ==="
-                    echo "Scope: ${params.TEST_SCOPE}"
+                    echo "═══════════════════════════════════════"
+                    echo " TEST PIPELINE: ${SERVICE} v${VERSION}"
+                    echo " Scope: ${params.TEST_SCOPE}"
+                    echo " Environment: ${ENVIRONMENT}"
+                    echo "═══════════════════════════════════════"
 
                     def notifier = new NotificationManager(this)
                     notifier.sendSlack('STARTED', getBuildDetails(this))
@@ -66,13 +76,14 @@ pipeline {
                         mkdir -p ${REPORT_DIR}/unit
                         mkdir -p ${REPORT_DIR}/integration
                         mkdir -p ${REPORT_DIR}/e2e
+                        mkdir -p ${REPORT_DIR}/lint
                         mkdir -p ${COVERAGE_DIR}
                     """
                 }
             }
         }
 
-        // ── STAGE 2: UNIT TESTS ────────────────────────────────
+        // ── STAGE 2: UNIT TESTS ─────────────────────────────────
         stage('Unit Tests') {
             when {
                 expression { return params.TEST_SCOPE in ['all', 'unit'] }
@@ -82,6 +93,7 @@ pipeline {
                     sh """
                         cd Microservices-projects/${SERVICE}
 
+                        # ── Python services ──────────────────────
                         if [ -f requirements.txt ]; then
                             pip3 install -r requirements.txt \
                                 pytest pytest-cov pytest-html -q
@@ -96,6 +108,7 @@ pipeline {
                                 -v test_*.py \
                                 2>&1 | tee ../../${REPORT_DIR}/unit/unit.log
 
+                        # ── Node/Frontend services ───────────────
                         elif [ -f package.json ]; then
                             npm install
                             npm test -- \
@@ -103,6 +116,7 @@ pipeline {
                                 --reporter-options output=../../${REPORT_DIR}/unit/unit-results.xml \
                                 2>&1 | tee ../../${REPORT_DIR}/unit/unit.log
 
+                        # ── Java services ────────────────────────
                         elif [ -f pom.xml ]; then
                             mvn test \
                                 -Dsurefire.reportsDirectory=../../${REPORT_DIR}/unit \
@@ -110,7 +124,7 @@ pipeline {
                                 2>&1 | tee ../../${REPORT_DIR}/unit/unit.log
 
                         else
-                            echo "No test framework detected"
+                            echo "No test framework detected — skipping unit tests"
                         fi
                     """
                 }
@@ -125,7 +139,7 @@ pipeline {
             }
         }
 
-        // ── STAGE 3: COVERAGE CHECK ────────────────────────────
+        // ── STAGE 3: COVERAGE CHECK ─────────────────────────────
         stage('Coverage Check') {
             when {
                 expression { return params.TEST_SCOPE in ['all', 'unit'] }
@@ -134,14 +148,15 @@ pipeline {
                 script {
                     echo "=== COVERAGE CHECK (min: ${COVERAGE_MIN}%) ==="
                 }
-                catchError(buildResult: params.FAIL_ON_COVERAGE ? 'FAILURE' : 'UNSTABLE',
-                           stageResult: 'FAILURE') {
+                catchError(
+                    buildResult: params.FAIL_ON_COVERAGE ? 'FAILURE' : 'UNSTABLE',
+                    stageResult: 'FAILURE'
+                ) {
                     sh """
                         if [ -f ${COVERAGE_DIR}/coverage.xml ]; then
                             COVERAGE=\$(python3 -c "
 import xml.etree.ElementTree as ET
-tree = ET.parse('${COVERAGE_DIR}/coverage.xml')
-root = tree.getroot()
+root = ET.parse('${COVERAGE_DIR}/coverage.xml').getroot()
 rate = float(root.get('line-rate', 0)) * 100
 print(f'{rate:.1f}')
 ")
@@ -150,13 +165,14 @@ print(f'{rate:.1f}')
 
                             python3 -c "
 rate = float('\${COVERAGE}')
-if rate < ${COVERAGE_MIN}:
-    print(f'FAILED: {rate:.1f}% < ${COVERAGE_MIN}%')
+threshold = ${COVERAGE_MIN}
+if rate < threshold:
+    print(f'COVERAGE FAILED: {rate:.1f}% < {threshold}%')
     exit(1)
-print(f'PASSED: {rate:.1f}% >= ${COVERAGE_MIN}%')
+print(f'COVERAGE PASSED: {rate:.1f}% >= {threshold}%')
 "
                         else
-                            echo "No coverage.xml found"
+                            echo "No coverage.xml found — skipping coverage check"
                         fi
                     """
                 }
@@ -176,6 +192,7 @@ print(f'PASSED: {rate:.1f}% >= ${COVERAGE_MIN}%')
             }
             parallel {
 
+                // ── 4a: INTEGRATION TESTS ────────────────────────
                 stage('Integration Tests') {
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
@@ -188,7 +205,11 @@ print(f'PASSED: {rate:.1f}% >= ${COVERAGE_MIN}%')
                                         -v -m integration \
                                         test_*.py \
                                         2>&1 | tee ../../${REPORT_DIR}/integration/integration.log \
-                                        || echo "Integration tests done"
+                                        || echo "Integration tests completed"
+                                elif [ -f package.json ]; then
+                                    npm run test:integration \
+                                        2>&1 | tee ../../${REPORT_DIR}/integration/integration.log \
+                                        || echo "Integration tests completed"
                                 else
                                     echo "No integration tests found"
                                 fi
@@ -205,26 +226,33 @@ print(f'PASSED: {rate:.1f}% >= ${COVERAGE_MIN}%')
                     }
                 }
 
+                // ── 4b: LINT & STATIC ANALYSIS ───────────────────
                 stage('Lint & Static Analysis') {
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                             sh """
                                 cd Microservices-projects/${SERVICE}
-                                mkdir -p ../../${REPORT_DIR}/lint
 
                                 if [ -f requirements.txt ]; then
                                     pip3 install flake8 pylint -q
 
-                                    flake8 . --max-line-length=120 \
+                                    echo "--- flake8 ---"
+                                    flake8 . \
+                                        --max-line-length=120 \
                                         --exclude=.git,__pycache__,venv \
-                                        > ../../${REPORT_DIR}/lint/flake8.log || true
+                                        > ../../${REPORT_DIR}/lint/flake8.log 2>&1 || true
+                                    cat ../../${REPORT_DIR}/lint/flake8.log
 
-                                    pylint *.py --fail-under=7.0 \
-                                        > ../../${REPORT_DIR}/lint/pylint.log \
+                                    echo "--- pylint ---"
+                                    pylint *.py \
+                                        --fail-under=7.0 \
+                                        > ../../${REPORT_DIR}/lint/pylint.log 2>&1 \
                                         || echo "Pylint score below threshold"
+                                    cat ../../${REPORT_DIR}/lint/pylint.log
 
                                 elif [ -f package.json ]; then
-                                    npm run lint > ../../${REPORT_DIR}/lint/eslint.log || true
+                                    npm run lint \
+                                        > ../../${REPORT_DIR}/lint/eslint.log 2>&1 || true
                                 fi
                             """
                         }
@@ -240,7 +268,7 @@ print(f'PASSED: {rate:.1f}% >= ${COVERAGE_MIN}%')
             } // end parallel
         }
 
-        // ── STAGE 5: E2E TESTS ─────────────────────────────────
+        // ── STAGE 5: E2E TESTS ──────────────────────────────────
         stage('E2E Tests') {
             when {
                 expression { return params.TEST_SCOPE in ['all', 'e2e'] }
@@ -250,45 +278,94 @@ print(f'PASSED: {rate:.1f}% >= ${COVERAGE_MIN}%')
                     sh """
                         mkdir -p ${REPORT_DIR}/e2e
 
-                        SVC_IP=\$(kubectl get svc ${SERVICE} -n staging \
-                            -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
+                        # ── Determine environments to test ────────
+                        case "${ENVIRONMENT}" in
+                            dev)     ENVS="dev" ;;
+                            staging) ENVS="staging" ;;
+                            prod)    ENVS="staging prod" ;;
+                            *)       ENVS="staging" ;;
+                        esac
 
-                        if [ -z "\$SVC_IP" ]; then
-                            echo "Service not found in staging — skipping E2E"
+                        echo "E2E environments: \$ENVS"
 
-                            # Generate empty pass result
-                            python3 -c "
-xml = '''<?xml version=\\"1.0\\" encoding=\\"UTF-8\\"?>
-<testsuite name=\\"E2E\\" tests=\\"1\\" failures=\\"0\\">
-  <testcase name=\\"e2e_skipped\\" classname=\\"e2e\\"><skipped/></testcase>
-</testsuite>'''
-open('${REPORT_DIR}/e2e/e2e-results.xml','w').write(xml)
-"
-                            exit 0
-                        fi
+                        TOTAL=0; PASSED=0; FAILED=0; XML_CASES=""
 
-                        STATUS=\$(kubectl exec -n staging \
-                            \$(kubectl get pods -n staging \
+                        for ENV in \$ENVS; do
+                            echo "=== E2E: ${SERVICE} in \$ENV ==="
+
+                            # Find pod (blue → green → any)
+                            POD=\$(kubectl get pods -n \$ENV \
                                 -l app=${SERVICE},slot=blue \
-                                -o jsonpath='{.items[0].metadata.name}') \
-                            -- curl -s -o /dev/null -w "%{http_code}" \
-                            http://localhost:8081/${SERVICE}/healthz \
-                            2>/dev/null || echo "000")
-                        echo "Health check: HTTP \$STATUS"
+                                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
 
-                        python3 -c "
-status = '\${STATUS}'
-passed = status == '200'
-xml = f'''<?xml version=\\"1.0\\" encoding=\\"UTF-8\\"?>
-<testsuite name=\\"E2E\\" tests=\\"1\\" failures=\\"{'0' if passed else '1'}\\">
-  <testcase name=\\"health_check\\" classname=\\"e2e.health\\">
-    {'' if passed else f'<failure>HTTP {status}</failure>'}
-  </testcase>
-</testsuite>'''
-open('${REPORT_DIR}/e2e/e2e-results.xml','w').write(xml)
-print('E2E: ' + ('PASSED' if passed else 'FAILED'))
-exit(0 if passed else 1)
-"
+                            if [ -z "\$POD" ]; then
+                                POD=\$(kubectl get pods -n \$ENV \
+                                    -l app=${SERVICE},slot=green \
+                                    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+                            fi
+
+                            if [ -z "\$POD" ]; then
+                                POD=\$(kubectl get pods -n \$ENV \
+                                    -l app=${SERVICE} \
+                                    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+                            fi
+
+                            if [ -z "\$POD" ]; then
+                                echo "No pod found in \$ENV — skipping"
+                                TOTAL=\$((TOTAL+1))
+                                XML_CASES="\$XML_CASES
+  <testcase name='e2e_health_\$ENV' classname='e2e.\$ENV'>
+    <skipped>No pod found in \$ENV</skipped>
+  </testcase>"
+                                continue
+                            fi
+
+                            echo "Pod: \$POD"
+
+                            # Health check with 5 retries
+                            STATUS="000"
+                            for i in 1 2 3 4 5; do
+                                STATUS=\$(kubectl exec -n \$ENV \$POD \
+                                    -- curl -s -o /dev/null \
+                                    -w "%{http_code}" \
+                                    http://localhost:8081/${SERVICE}/healthz \
+                                    2>/dev/null || echo "000")
+                                echo "Attempt \$i [\$ENV]: HTTP \$STATUS"
+                                if [ "\$STATUS" = "200" ]; then break; fi
+                                sleep 5
+                            done
+
+                            TOTAL=\$((TOTAL+1))
+                            if [ "\$STATUS" = "200" ]; then
+                                PASSED=\$((PASSED+1))
+                                echo "E2E PASSED: \$ENV ✅"
+                                XML_CASES="\$XML_CASES
+  <testcase name='e2e_health_\$ENV' classname='e2e.\$ENV'/>"
+                            else
+                                FAILED=\$((FAILED+1))
+                                echo "E2E FAILED: \$ENV ❌ (HTTP \$STATUS)"
+                                XML_CASES="\$XML_CASES
+  <testcase name='e2e_health_\$ENV' classname='e2e.\$ENV'>
+    <failure message='HTTP \$STATUS'>Health check failed: HTTP \$STATUS in \$ENV</failure>
+  </testcase>"
+                            fi
+                        done
+
+                        # Write JUnit XML
+                        cat > ${REPORT_DIR}/e2e/e2e-results.xml << XMLEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="E2E-${SERVICE}" tests="\$TOTAL" failures="\$FAILED" skipped="0">
+\$XML_CASES
+</testsuite>
+XMLEOF
+
+                        echo "E2E Summary → Total: \$TOTAL | Passed: \$PASSED | Failed: \$FAILED"
+
+                        if [ "\$FAILED" -gt "0" ]; then
+                            echo "E2E FAILED in \$FAILED environment(s)"
+                            exit 1
+                        fi
+                        echo "All E2E tests PASSED ✅"
                     """
                 }
             }
@@ -318,7 +395,7 @@ class TestReport(FPDF):
         self.set_font('Helvetica', 'B', 16)
         self.set_fill_color(41, 128, 185)
         self.set_text_color(255, 255, 255)
-        self.cell(0, 12, 'Jenkins Test Report', ln=True, fill=True, align='C')
+        self.cell(0, 12, 'Jenkins Test Report', new_x='LMARGIN', new_y='NEXT', fill=True, align='C')
         self.set_text_color(0, 0, 0)
         self.ln(4)
 
@@ -344,11 +421,11 @@ def parse_junit(path):
             elif tc.find('skipped') is not None: st = 'SKIP'
             cases.append({'name': tc.get('name','?'), 'status': st, 'time': tc.get('time','0')})
         return {
-            'tests': int(suite.get('tests', len(cases))),
+            'tests'   : int(suite.get('tests', len(cases))),
             'failures': int(suite.get('failures', 0)),
-            'errors': int(suite.get('errors', 0)),
-            'skipped': int(suite.get('skipped', 0)),
-            'cases': cases
+            'errors'  : int(suite.get('errors', 0)),
+            'skipped' : int(suite.get('skipped', 0)),
+            'cases'   : cases
         }
     except:
         return {'tests':0,'failures':0,'errors':0,'skipped':0,'cases':[]}
@@ -373,25 +450,30 @@ pdf = TestReport()
 pdf.set_auto_page_break(auto=True, margin=15)
 pdf.add_page()
 
-# Build Info
+# ── Build Info ─────────────────────────────────────────────
 pdf.set_font('Helvetica', 'B', 13)
 pdf.set_fill_color(236, 240, 241)
-pdf.cell(0, 9, 'Build Information', ln=True, fill=True)
+pdf.cell(0, 9, 'Build Information', new_x='LMARGIN', new_y='NEXT', fill=True)
 pdf.ln(2)
-for k, v in [('Service','${SERVICE}'),('Version','${VERSION}'),
-             ('Build No.','${BUILD_NUMBER}'),
-             ('Timestamp', datetime.datetime.now().strftime('%Y-%m-%d %H:%M')),
-             ('Test Scope','${params.TEST_SCOPE}')]:
+for k, v in [
+    ('Service',     '${SERVICE}'),
+    ('Version',     '${VERSION}'),
+    ('Environment', '${ENVIRONMENT}'),
+    ('Build No.',   '${BUILD_NUMBER}'),
+    ('Branch',      '${GIT_BRANCH}' or 'master'),
+    ('Timestamp',   datetime.datetime.now().strftime('%Y-%m-%d %H:%M')),
+    ('Test Scope',  '${params.TEST_SCOPE}'),
+]:
     pdf.set_font('Helvetica', 'B', 10)
     pdf.cell(45, 7, k + ':')
     pdf.set_font('Helvetica', '', 10)
-    pdf.cell(0, 7, str(v), ln=True)
+    pdf.cell(0, 7, str(v), new_x='LMARGIN', new_y='NEXT')
 pdf.ln(4)
 
-# Summary Table
+# ── Test Summary Table ─────────────────────────────────────
 pdf.set_font('Helvetica', 'B', 13)
 pdf.set_fill_color(236, 240, 241)
-pdf.cell(0, 9, 'Test Summary', ln=True, fill=True)
+pdf.cell(0, 9, 'Test Summary', new_x='LMARGIN', new_y='NEXT', fill=True)
 pdf.ln(2)
 
 pdf.set_font('Helvetica', 'B', 10)
@@ -409,42 +491,43 @@ def suite_row(pdf, name, data):
     pdf.set_font('Helvetica', '', 10)
     pdf.set_fill_color(249, 249, 249)
     pdf.cell(50, 7, name, border=1, fill=True)
-    pdf.cell(25, 7, str(data['tests']),   border=1, align='C', fill=True)
-    pdf.cell(25, 7, str(passed),          border=1, align='C', fill=True)
-    pdf.cell(25, 7, str(data['failures']),border=1, align='C', fill=True)
-    pdf.cell(25, 7, str(data.get('skipped',0)), border=1, align='C', fill=True)
+    pdf.cell(25, 7, str(data['tests']),        border=1, align='C', fill=True)
+    pdf.cell(25, 7, str(passed),               border=1, align='C', fill=True)
+    pdf.cell(25, 7, str(data['failures']),     border=1, align='C', fill=True)
+    pdf.cell(25, 7, str(data.get('skipped',0)),border=1, align='C', fill=True)
     pdf.set_fill_color(*c); pdf.set_text_color(255,255,255)
     pdf.cell(40, 7, 'PASS' if ok else 'FAIL', border=1, align='C', fill=True)
     pdf.set_text_color(0,0,0); pdf.ln()
 
-suite_row(pdf, 'Unit Tests', unit)
+suite_row(pdf, 'Unit Tests',        unit)
 suite_row(pdf, 'Integration Tests', intg)
-suite_row(pdf, 'E2E Tests', e2e)
+suite_row(pdf, 'E2E Tests',         e2e)
 
 pdf.set_font('Helvetica', 'B', 10)
 pdf.set_fill_color(41, 128, 185); pdf.set_text_color(255,255,255)
 ok = total_failures == 0
-pdf.cell(50, 8, 'TOTAL',            border=1, fill=True)
-pdf.cell(25, 8, str(total_tests),   border=1, align='C', fill=True)
-pdf.cell(25, 8, str(total_passed),  border=1, align='C', fill=True)
-pdf.cell(25, 8, str(total_failures),border=1, align='C', fill=True)
-pdf.cell(25, 8, '-',                border=1, align='C', fill=True)
+pdf.cell(50, 8, 'TOTAL',             border=1, fill=True)
+pdf.cell(25, 8, str(total_tests),    border=1, align='C', fill=True)
+pdf.cell(25, 8, str(total_passed),   border=1, align='C', fill=True)
+pdf.cell(25, 8, str(total_failures), border=1, align='C', fill=True)
+pdf.cell(25, 8, '-',                 border=1, align='C', fill=True)
 pdf.cell(40, 8, 'PASS' if ok else 'FAIL', border=1, align='C', fill=True)
 pdf.set_text_color(0,0,0); pdf.ln(6)
 
-# Coverage
+# ── Coverage ───────────────────────────────────────────────
 pdf.set_font('Helvetica', 'B', 13)
 pdf.set_fill_color(236, 240, 241)
-pdf.cell(0, 9, 'Code Coverage', ln=True, fill=True)
+pdf.cell(0, 9, 'Code Coverage', new_x='LMARGIN', new_y='NEXT', fill=True)
 pdf.ln(2)
 if cov is not None:
-    c = (39,174,96) if cov >= 80 else (231,76,60)
+    c = (39,174,96) if cov >= 60 else (231,76,60)
     pdf.set_font('Helvetica', 'B', 32)
     pdf.set_text_color(*c)
-    pdf.cell(0, 14, f'{cov:.1f}%', ln=True, align='C')
+    pdf.cell(0, 14, f'{cov:.1f}%', new_x='LMARGIN', new_y='NEXT', align='C')
     pdf.set_text_color(0,0,0)
     pdf.set_font('Helvetica', '', 10)
-    pdf.cell(0, 7, f'Threshold: 80% | {"PASSED" if cov>=80 else "FAILED"}', ln=True, align='C')
+    pdf.cell(0, 7, f'Threshold: 60% | {"PASSED" if cov>=60 else "FAILED"}',
+             new_x='LMARGIN', new_y='NEXT', align='C')
     pdf.ln(2)
     pdf.set_fill_color(220,220,220)
     pdf.cell(170, 8, '', border=0, fill=True); pdf.ln()
@@ -453,21 +536,21 @@ if cov is not None:
     pdf.cell(min(170*cov/100, 170), 8, '', border=0, fill=True); pdf.ln(6)
 else:
     pdf.set_font('Helvetica','I',10)
-    pdf.cell(0,7,'Coverage data not available',ln=True)
+    pdf.cell(0,7,'Coverage data not available', new_x='LMARGIN', new_y='NEXT')
 pdf.ln(4)
 
-# Test Case Details
+# ── Test Case Details ──────────────────────────────────────
 for sname, sdata in [('Unit Tests',unit),('Integration Tests',intg),('E2E Tests',e2e)]:
     if not sdata['cases']: continue
     pdf.set_font('Helvetica','B',12)
     pdf.set_fill_color(52,73,94); pdf.set_text_color(255,255,255)
-    pdf.cell(0,8,f'  {sname}',ln=True,fill=True)
+    pdf.cell(0,8,f'  {sname}', new_x='LMARGIN', new_y='NEXT', fill=True)
     pdf.set_text_color(0,0,0); pdf.ln(1)
     pdf.set_font('Helvetica','B',9)
     pdf.set_fill_color(189,195,199)
     pdf.cell(115,7,'Test Name',border=1,fill=True)
-    pdf.cell(30,7,'Status',border=1,align='C',fill=True)
-    pdf.cell(25,7,'Time(s)',border=1,align='C',fill=True); pdf.ln()
+    pdf.cell(30, 7,'Status',  border=1,align='C',fill=True)
+    pdf.cell(25, 7,'Time(s)', border=1,align='C',fill=True); pdf.ln()
     sc = {'PASS':(39,174,96),'FAIL':(231,76,60),'ERROR':(231,76,60),'SKIP':(243,156,18)}
     for i,case in enumerate(sdata['cases']):
         bg = (249,249,249) if i%2==0 else (255,255,255)
@@ -481,6 +564,7 @@ for sname, sdata in [('Unit Tests',unit),('Integration Tests',intg),('E2E Tests'
         pdf.cell(25,6,case['time'],border=1,align='C',fill=True); pdf.ln()
     pdf.ln(4)
 
+os.makedirs('${REPORT_DIR}', exist_ok=True)
 pdf.output('${REPORT_DIR}/test-report.pdf')
 print('PDF generated: ${REPORT_DIR}/test-report.pdf')
 PYEOF
@@ -494,7 +578,7 @@ PYEOF
             }
         }
 
-        // ── STAGE 7: PUBLISH REPORTS ───────────────────────────
+        // ── STAGE 7: PUBLISH REPORTS ────────────────────────────
         stage('Publish Reports') {
             steps {
                 script {
@@ -508,10 +592,15 @@ PYEOF
 
     } // end stages
 
-    // ── POST BLOCKS ───────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════
+    //  POST BLOCKS
+    // ═══════════════════════════════════════════════════════════
     post {
 
         always {
+            script {
+                echo "Pipeline finished — Status: ${currentBuild.currentResult}"
+            }
             archiveArtifacts artifacts: "${REPORT_DIR}/**",
                              allowEmptyArchive: true
         }
@@ -522,21 +611,13 @@ PYEOF
                 def details  = getBuildDetails(this)
                 details.changes = details.changes + " | ALL TESTS PASSED ✅"
 
-                try {
-                    withCredentials([string(credentialsId: 'slackaditya', variable: 'SLACK_TOKEN')]) {
-                        sh """
-                            curl -s \
-                                -F file=@${REPORT_DIR}/test-report.pdf \
-                                -F channels=#jenkins-notifications \
-                                -F initial_comment="Test Report: ${SERVICE} v${VERSION}" \
-                                -H "Authorization: Bearer \$SLACK_TOKEN" \
-                                https://slack.com/api/files.upload
-                        """
-                  }
-                } catch (Exception e) {
-                    echo "WARNING: PDF upload failed: ${e.message}"
-                    notifier.sendSlack('SUCCESS', details)
-                }
+                // Send Slack with Quick Links
+                notifier.sendSlack('SUCCESS', details)
+
+                // Upload PDF to Slack
+                uploadPdfToSlack("✅ Test Report: ${SERVICE} v${VERSION} — ALL TESTS PASSED")
+
+                // Send Email
                 notifier.sendEmail('SUCCESS', details)
             }
         }
@@ -547,16 +628,13 @@ PYEOF
                 def details  = getBuildDetails(this)
                 details.changes = details.changes + " | TESTS FAILED ❌"
 
-                try {
-                    slackUploadFile(
-                        credentialId   : 'slackaditya',
-                        channel        : '#jenkins-notifications',
-                        filePath       : "${REPORT_DIR}/test-report.pdf",
-                        initialComment : "❌ *Test Report: ${SERVICE} v${VERSION}* — FAILED!"
-                    )
-                } catch (Exception e) {
-                    notifier.sendSlack('FAILURE', details)
-                }
+                // Send Slack with Quick Links
+                notifier.sendSlack('FAILURE', details)
+
+                // Upload PDF to Slack
+                uploadPdfToSlack("❌ Test Report: ${SERVICE} v${VERSION} — FAILED")
+
+                // Send Email
                 notifier.sendEmail('FAILURE', details)
             }
         }
@@ -567,16 +645,13 @@ PYEOF
                 def details  = getBuildDetails(this)
                 details.changes = details.changes + " | UNSTABLE ⚠️"
 
-                try {
-                    slackUploadFile(
-                        credentialId   : 'slackaditya',
-                        channel        : '#jenkins-notifications',
-                        filePath       : "${REPORT_DIR}/test-report.pdf",
-                        initialComment : "⚠️ *Test Report: ${SERVICE} v${VERSION}* — UNSTABLE"
-                    )
-                } catch (Exception e) {
-                    notifier.sendSlack('UNSTABLE', details)
-                }
+                // Send Slack with Quick Links
+                notifier.sendSlack('UNSTABLE', details)
+
+                // Upload PDF to Slack
+                uploadPdfToSlack("⚠️ Test Report: ${SERVICE} v${VERSION} — UNSTABLE")
+
+                // Send Email
                 notifier.sendEmail('UNSTABLE', details)
             }
         }
@@ -587,7 +662,42 @@ PYEOF
     }
 }
 
-// ── HELPER ────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+//  HELPER — Upload PDF to Slack via curl
+// ═══════════════════════════════════════════════════════════════
+def uploadPdfToSlack(String comment) {
+    try {
+        withCredentials([string(credentialsId: env.SLACK_CRED_ID, variable: 'SLACK_TOKEN')]) {
+            sh """
+                if [ -f ${env.REPORT_DIR}/test-report.pdf ]; then
+                    RESPONSE=\$(curl -s \
+                        -F file=@${env.REPORT_DIR}/test-report.pdf \
+                        -F channels=${env.SLACK_CHANNEL} \
+                        -F initial_comment="${comment}" \
+                        -H "Authorization: Bearer \$SLACK_TOKEN" \
+                        https://slack.com/api/files.upload)
+                    echo "Slack upload response: \$RESPONSE"
+                    echo "\$RESPONSE" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+if r.get('ok'):
+    print('PDF uploaded to Slack ✅')
+else:
+    print(f'Slack upload warning: {r.get(\\\"error\\\", \\\"unknown\\\")}')
+"
+                else
+                    echo "PDF not found — skipping Slack upload"
+                fi
+            """
+        }
+    } catch (Exception e) {
+        echo "WARNING: Slack PDF upload failed: ${e.message}"
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  HELPER — Build Details Map
+// ═══════════════════════════════════════════════════════════════
 def getBuildDetails(def ctx) {
     String changes = 'No changes'
     try {
@@ -598,6 +708,7 @@ def getBuildDetails(def ctx) {
     } catch (Exception e) {
         changes = 'Could not fetch changes'
     }
+
     return [
         jobName    : ctx.env.JOB_NAME        ?: 'Unknown Job',
         buildNumber: ctx.env.BUILD_NUMBER    ?: '0',
@@ -605,7 +716,7 @@ def getBuildDetails(def ctx) {
         branch     : ctx.env.GIT_BRANCH      ?: 'master',
         service    : ctx.params.SERVICE      ?: 'unknown',
         version    : ctx.params.VERSION      ?: '0.0.0',
-        environment: 'testing',
+        environment: ctx.params.ENVIRONMENT  ?: 'staging',
         duration   : ctx.currentBuild.durationString ?: 'N/A',
         changes    : changes,
         recipients : ctx.params.RECIPIENTS   ?: 'YOUR_EMAIL@gmail.com'
