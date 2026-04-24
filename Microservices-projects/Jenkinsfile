@@ -83,10 +83,10 @@ pipeline {
                         cd Microservices-projects/${SERVICE}
 
                         if [ -f requirements.txt ]; then
-                            pip install -r requirements.txt \
-                                pytest pytest-cov pytest-html --break-system-packages -q
+                            pip3 install -r requirements.txt \
+                                pytest pytest-cov pytest-html -q
 
-                            python -m pytest \
+                            python3 -m pytest \
                                 --junitxml=../../${REPORT_DIR}/unit/unit-results.xml \
                                 --cov=. \
                                 --cov-report=xml:../../${COVERAGE_DIR}/coverage.xml \
@@ -183,7 +183,7 @@ print(f'PASSED: {rate:.1f}% >= ${COVERAGE_MIN}%')
                                 cd Microservices-projects/${SERVICE}
 
                                 if [ -f requirements.txt ]; then
-                                    python -m pytest \
+                                    python3 -m pytest \
                                         --junitxml=../../${REPORT_DIR}/integration/integration-results.xml \
                                         -v -m integration \
                                         test_*.py *_test.py \
@@ -213,7 +213,7 @@ print(f'PASSED: {rate:.1f}% >= ${COVERAGE_MIN}%')
                                 mkdir -p ../../${REPORT_DIR}/lint
 
                                 if [ -f requirements.txt ]; then
-                                    pip install flake8 pylint --break-system-packages -q
+                                    pip3 install flake8 pylint -q
 
                                     flake8 . --max-line-length=120 \
                                         --exclude=.git,__pycache__,venv \
@@ -301,7 +301,7 @@ exit(0 if passed else 1)
         stage('Generate PDF Report') {
             steps {
                 sh """
-                    pip install fpdf2 --break-system-packages -q
+                    pip3 install fpdf2 -q
 
                     python3 << 'PYEOF'
 from fpdf import FPDF
