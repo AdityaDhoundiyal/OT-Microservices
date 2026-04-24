@@ -267,8 +267,13 @@ open('${REPORT_DIR}/e2e/e2e-results.xml','w').write(xml)
                             exit 0
                         fi
 
-                        STATUS=\$(curl -s -o /dev/null -w "%{http_code}" \
-                            http://\${SVC_IP}/${SERVICE}/healthz || echo "000")
+                        STATUS=\$(kubectl exec -n staging \
+                            \$(kubectl get pods -n staging \
+                                -l app=${SERVICE},slot=blue \
+                                -o jsonpath='{.items[0].metadata.name}') \
+                            -- curl -s -o /dev/null -w "%{http_code}" \
+                            http://localhost:8081/${SERVICE}/healthz \
+                            2>/dev/null || echo "000")
                         echo "Health check: HTTP \$STATUS"
 
                         python3 -c "
@@ -518,12 +523,16 @@ PYEOF
                 details.changes = details.changes + " | ALL TESTS PASSED ✅"
 
                 try {
-                    slackUploadFile(
-                        credentialId   : 'slackaditya',
-                        channel        : '#jenkins-notifications',
-                        filePath       : "${REPORT_DIR}/test-report.pdf",
-                        initialComment : "✅ *Test Report: ${SERVICE} v${VERSION}* — All tests passed!"
-                    )
+                    withCredentials([string(credentialsId: 'slackaditya', variable: 'SLACK_TOKEN')]) {
+                        sh """
+                            curl -s \
+                                -F file=@${REPORT_DIR}/test-report.pdf \
+                                -F channels=#jenkins-notifications \
+                                -F initial_comment="Test Report: ${SERVICE} v${VERSION}" \
+                                -H "Authorization: Bearer \$SLACK_TOKEN" \
+                                https://slack.com/api/files.upload
+                        """
+                  }
                 } catch (Exception e) {
                     echo "WARNING: PDF upload failed: ${e.message}"
                     notifier.sendSlack('SUCCESS', details)
