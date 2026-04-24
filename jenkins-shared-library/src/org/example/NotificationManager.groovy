@@ -8,6 +8,8 @@ class NotificationManager implements Serializable {
         this.script = script
     }
 
+    // ── SLACK NOTIFICATION ────────────────────────────────────
+
     void sendSlack(String status, Map details) {
         try {
             String color   = getColor(status)
@@ -27,6 +29,8 @@ class NotificationManager implements Serializable {
             script.echo "WARNING: Slack notification failed: ${e.message}"
         }
     }
+
+    // ── EMAIL NOTIFICATION ────────────────────────────────────
 
     void sendEmail(String status, Map details) {
         try {
@@ -48,6 +52,8 @@ class NotificationManager implements Serializable {
         }
     }
 
+    // ── MS TEAMS NOTIFICATION ─────────────────────────────────
+
     void sendTeams(String status, Map details) {
         try {
             String color   = getTeamsColor(status)
@@ -58,8 +64,8 @@ class NotificationManager implements Serializable {
                 script.string(credentialsId: 'teams-webhook', variable: 'TEAMS_URL')
             ]) {
                 script.sh("""
-                    curl -s -X POST "\$TEAMS_URL" \
-                        -H "Content-Type: application/json" \
+                    curl -s -X POST "\$TEAMS_URL" \\
+                        -H "Content-Type: application/json" \\
                         -d '${message}' || echo "Teams notification failed"
                 """)
             }
@@ -71,11 +77,15 @@ class NotificationManager implements Serializable {
         }
     }
 
+    // ── SEND ALL NOTIFICATIONS ────────────────────────────────
+
     void notifyAll(String status, Map details) {
         sendSlack(status, details)
         sendEmail(status, details)
         sendTeams(status, details)
     }
+
+    // ── PRIVATE — MESSAGE BUILDERS ────────────────────────────
 
     private String buildSlackMessage(String status, String emoji, Map d) {
         return """
@@ -174,6 +184,8 @@ ${emoji} *${status}: ${d.jobName} #${d.buildNumber}*
 }
         """.trim()
     }
+
+    // ── PRIVATE — HELPERS ─────────────────────────────────────
 
     private String getColor(String status) {
         switch(status) {
