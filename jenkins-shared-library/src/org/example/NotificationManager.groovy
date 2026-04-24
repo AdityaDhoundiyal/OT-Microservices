@@ -90,23 +90,22 @@ class NotificationManager implements Serializable {
 
     // ── PRIVATE — MESSAGE BUILDERS ────────────────────────────
 
-    // CHANGE 1: Artifacts, Tests, Coverage links add kiye
     private String buildSlackMessage(String status, String emoji, Map d) {
 
-        // Links build karo
-        String buildUrl      = d.buildUrl      ?: 'http://localhost:8080'
-        String artifactsUrl  = d.artifactsUrl  ?: "${buildUrl}artifact/${d.service}/tests/reports/test-report.pdf"
-        String testsUrl      = d.testsUrl      ?: "${buildUrl}testReport/"
-        String coverageUrl   = d.coverageUrl   ?: "${buildUrl}Coverage_20Report/"
+        // FIX: Safely read all URLs with null-safe fallback
+        String buildUrl     = d['buildUrl']     ?: 'http://localhost:8080'
+        String testsUrl     = d['testsUrl']     ?: "${buildUrl}testReport/"
+        String coverageUrl  = d['coverageUrl']  ?: "${buildUrl}coverage/"
+        String artifactsUrl = d['artifactsUrl'] ?: "${buildUrl}artifact/test-reports/test-report.pdf"
 
         return """
-${emoji} *${status}: ${d.jobName} #${d.buildNumber}*
-> *Branch*      : ${d.branch}
-> *Service*     : ${d.service}
-> *Version*     : ${d.version}
-> *Env*         : ${d.environment}
-> *Duration*    : ${d.duration}
-> *Changes*     : ${d.changes}
+${emoji} *${status}: ${d['jobName']} #${d['buildNumber']}*
+> *Branch*      : ${d['branch']}
+> *Service*     : ${d['service']}
+> *Version*     : ${d['version']}
+> *Env*         : ${d['environment']}
+> *Duration*    : ${d['duration']}
+> *Changes*     : ${d['changes']}
 
 *Quick Links:*
 > <${buildUrl}|🔗 View Build Page>
@@ -118,18 +117,18 @@ ${emoji} *${status}: ${d.jobName} #${d.buildNumber}*
 
     private String buildEmailSubject(String status, Map d) {
         String emoji = getEmoji(status)
-        return "${emoji} ${status}: ${d.jobName} #${d.buildNumber} [${d.branch}]"
+        return "${emoji} ${status}: ${d['jobName']} #${d['buildNumber']} [${d['branch']}]"
     }
 
-    // CHANGE 2: 4 action buttons add kiye email mein
     private String buildEmailBody(String status, Map d) {
         String color = getHtmlColor(status)
+        String emoji = getEmoji(status)
 
-        // Links build karo
-        String buildUrl     = d.buildUrl     ?: 'http://localhost:8080'
-        String artifactsUrl = d.artifactsUrl ?: "${buildUrl}artifact/${d.service}/tests/reports/test-report.pdf"
-        String testsUrl     = d.testsUrl     ?: "${buildUrl}testReport/"
-        String coverageUrl  = d.coverageUrl  ?: "${buildUrl}Coverage_20Report/"
+        // FIX: Safely read all URLs with null-safe fallback
+        String buildUrl     = d['buildUrl']     ?: 'http://localhost:8080'
+        String testsUrl     = d['testsUrl']     ?: "${buildUrl}testReport/"
+        String coverageUrl  = d['coverageUrl']  ?: "${buildUrl}coverage/"
+        String artifactsUrl = d['artifactsUrl'] ?: "${buildUrl}artifact/test-reports/test-report.pdf"
 
         return """
 <!DOCTYPE html>
@@ -142,7 +141,7 @@ ${emoji} *${status}: ${d.jobName} #${d.buildNumber}*
               border-radius: 8px;
               margin-bottom: 20px;">
     <h2 style="color: white; margin: 0;">
-      ${getEmoji(status)} Build ${status}
+      ${emoji} Build ${status}
     </h2>
   </div>
 
@@ -152,39 +151,39 @@ ${emoji} *${status}: ${d.jobName} #${d.buildNumber}*
                 margin-bottom:20px;">
     <tr style="background-color:#f2f2f2;">
       <td style="padding:10px; border:1px solid #ddd; font-weight:bold; width:30%;">Job Name</td>
-      <td style="padding:10px; border:1px solid #ddd;">${d.jobName}</td>
+      <td style="padding:10px; border:1px solid #ddd;">${d['jobName']}</td>
     </tr>
     <tr>
       <td style="padding:10px; border:1px solid #ddd; font-weight:bold;">Build Number</td>
-      <td style="padding:10px; border:1px solid #ddd;">#${d.buildNumber}</td>
+      <td style="padding:10px; border:1px solid #ddd;">#${d['buildNumber']}</td>
     </tr>
     <tr style="background-color:#f2f2f2;">
       <td style="padding:10px; border:1px solid #ddd; font-weight:bold;">Branch</td>
-      <td style="padding:10px; border:1px solid #ddd;">${d.branch}</td>
+      <td style="padding:10px; border:1px solid #ddd;">${d['branch']}</td>
     </tr>
     <tr>
       <td style="padding:10px; border:1px solid #ddd; font-weight:bold;">Service</td>
-      <td style="padding:10px; border:1px solid #ddd;">${d.service}</td>
+      <td style="padding:10px; border:1px solid #ddd;">${d['service']}</td>
     </tr>
     <tr style="background-color:#f2f2f2;">
       <td style="padding:10px; border:1px solid #ddd; font-weight:bold;">Version</td>
-      <td style="padding:10px; border:1px solid #ddd;">${d.version}</td>
+      <td style="padding:10px; border:1px solid #ddd;">${d['version']}</td>
     </tr>
     <tr>
       <td style="padding:10px; border:1px solid #ddd; font-weight:bold;">Environment</td>
-      <td style="padding:10px; border:1px solid #ddd;">${d.environment}</td>
+      <td style="padding:10px; border:1px solid #ddd;">${d['environment']}</td>
     </tr>
     <tr style="background-color:#f2f2f2;">
       <td style="padding:10px; border:1px solid #ddd; font-weight:bold;">Duration</td>
-      <td style="padding:10px; border:1px solid #ddd;">${d.duration}</td>
+      <td style="padding:10px; border:1px solid #ddd;">${d['duration']}</td>
     </tr>
     <tr>
       <td style="padding:10px; border:1px solid #ddd; font-weight:bold;">Changes</td>
-      <td style="padding:10px; border:1px solid #ddd;">${d.changes}</td>
+      <td style="padding:10px; border:1px solid #ddd;">${d['changes']}</td>
     </tr>
   </table>
 
-  <!-- CHANGE 2: 4 Action Buttons -->
+  <!-- 4 Action Buttons -->
   <p style="font-weight:bold; margin-bottom:10px;">Quick Links:</p>
   <table style="margin-bottom:20px;">
     <tr>
@@ -244,31 +243,30 @@ ${emoji} *${status}: ${d.jobName} #${d.buildNumber}*
         """.trim()
     }
 
-    // CHANGE 3: 4 action buttons add kiye Teams mein
     private String buildTeamsMessage(String status, String emoji, Map d) {
         String color = getTeamsColor(status)
 
-        // Links build karo
-        String buildUrl     = d.buildUrl     ?: 'http://localhost:8080'
-        String artifactsUrl = d.artifactsUrl ?: "${buildUrl}artifact/${d.service}/tests/reports/test-report.pdf"
-        String testsUrl     = d.testsUrl     ?: "${buildUrl}testReport/"
-        String coverageUrl  = d.coverageUrl  ?: "${buildUrl}Coverage_20Report/"
+        // FIX: Safely read all URLs with null-safe fallback
+        String buildUrl     = d['buildUrl']     ?: 'http://localhost:8080'
+        String testsUrl     = d['testsUrl']     ?: "${buildUrl}testReport/"
+        String coverageUrl  = d['coverageUrl']  ?: "${buildUrl}coverage/"
+        String artifactsUrl = d['artifactsUrl'] ?: "${buildUrl}artifact/test-reports/test-report.pdf"
 
         return """
 {
     "@type": "MessageCard",
     "@context": "http://schema.org/extensions",
     "themeColor": "${color}",
-    "summary": "${status}: ${d.jobName} #${d.buildNumber}",
+    "summary": "${status}: ${d['jobName']} #${d['buildNumber']}",
     "sections": [{
-        "activityTitle": "${emoji} **${status}: ${d.jobName}**",
-        "activitySubtitle": "Build #${d.buildNumber} | Branch: ${d.branch}",
+        "activityTitle": "${emoji} **${status}: ${d['jobName']}**",
+        "activitySubtitle": "Build #${d['buildNumber']} | Branch: ${d['branch']}",
         "facts": [
-            {"name": "Service",     "value": "${d.service}"},
-            {"name": "Version",     "value": "${d.version}"},
-            {"name": "Environment", "value": "${d.environment}"},
-            {"name": "Duration",    "value": "${d.duration}"},
-            {"name": "Changes",     "value": "${d.changes}"}
+            {"name": "Service",     "value": "${d['service']}"},
+            {"name": "Version",     "value": "${d['version']}"},
+            {"name": "Environment", "value": "${d['environment']}"},
+            {"name": "Duration",    "value": "${d['duration']}"},
+            {"name": "Changes",     "value": "${d['changes']}"}
         ],
         "markdown": true
     }],
@@ -299,7 +297,6 @@ ${emoji} *${status}: ${d.jobName} #${d.buildNumber}*
     }
 
     // ── PRIVATE — HELPERS ─────────────────────────────────────
-    // NO CHANGE — same rakha
 
     private String getColor(String status) {
         switch(status) {
@@ -331,13 +328,14 @@ ${emoji} *${status}: ${d.jobName} #${d.buildNumber}*
         }
     }
 
+    // FIX: Return actual emoji characters instead of plain text strings
     private String getEmoji(String status) {
         switch(status) {
-            case 'SUCCESS'  : return 'SUCCESS'
-            case 'FAILURE'  : return 'FAILED'
-            case 'UNSTABLE' : return 'UNSTABLE'
-            case 'STARTED'  : return 'STARTED'
-            default         : return 'INFO'
+            case 'SUCCESS'  : return '✅'
+            case 'FAILURE'  : return '❌'
+            case 'UNSTABLE' : return '⚠️'
+            case 'STARTED'  : return '🚀'
+            default         : return 'ℹ️'
         }
     }
 }
