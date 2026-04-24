@@ -45,16 +45,16 @@ pipeline {
     }
 
     environment {
-        SERVICE         = "${params.SERVICE}"
-        VERSION         = "${params.VERSION}"
-        ENVIRONMENT     = "${params.ENVIRONMENT}"
-        COVERAGE_MIN    = '60'
-        REPORT_DIR      = 'test-reports'
-        COVERAGE_DIR    = 'coverage-reports'
-        JUNIT_PATTERN   = "${REPORT_DIR}/**/*.xml"
-        KUBECONFIG      = '/var/lib/jenkins/.kube/config'
-        SLACK_CHANNEL   = '#jenkins-notifications'
-        SLACK_CRED_ID   = 'slackaditya'
+        SERVICE       = "${params.SERVICE}"
+        VERSION       = "${params.VERSION}"
+        ENVIRONMENT   = "${params.ENVIRONMENT}"
+        COVERAGE_MIN  = '60'
+        REPORT_DIR    = 'test-reports'
+        COVERAGE_DIR  = 'coverage-reports'
+        JUNIT_PATTERN = "${REPORT_DIR}/**/*.xml"
+        KUBECONFIG    = '/var/lib/jenkins/.kube/config'
+        SLACK_CHANNEL = '#jenkins-notifications'
+        SLACK_CRED_ID = 'slackaditya'
     }
 
     stages {
@@ -65,7 +65,7 @@ pipeline {
                 script {
                     echo "═══════════════════════════════════════"
                     echo " TEST PIPELINE: ${SERVICE} v${VERSION}"
-                    echo " Scope: ${params.TEST_SCOPE}"
+                    echo " Scope     : ${params.TEST_SCOPE}"
                     echo " Environment: ${ENVIRONMENT}"
                     echo "═══════════════════════════════════════"
 
@@ -124,7 +124,7 @@ pipeline {
                                 2>&1 | tee ../../${REPORT_DIR}/unit/unit.log
 
                         else
-                            echo "No test framework detected — skipping unit tests"
+                            echo "No test framework detected — skipping"
                         fi
                     """
                 }
@@ -278,7 +278,7 @@ print(f'COVERAGE PASSED: {rate:.1f}% >= {threshold}%')
                     sh """
                         mkdir -p ${REPORT_DIR}/e2e
 
-                        # ── Determine environments to test ────────
+                        # Determine environments to test
                         case "${ENVIRONMENT}" in
                             dev)     ENVS="dev" ;;
                             staging) ENVS="staging" ;;
@@ -287,7 +287,6 @@ print(f'COVERAGE PASSED: {rate:.1f}% >= {threshold}%')
                         esac
 
                         echo "E2E environments: \$ENVS"
-
                         TOTAL=0; PASSED=0; FAILED=0; XML_CASES=""
 
                         for ENV in \$ENVS; do
@@ -351,7 +350,6 @@ print(f'COVERAGE PASSED: {rate:.1f}% >= {threshold}%')
                             fi
                         done
 
-                        # Write JUnit XML
                         cat > ${REPORT_DIR}/e2e/e2e-results.xml << XMLEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <testsuite name="E2E-${SERVICE}" tests="\$TOTAL" failures="\$FAILED" skipped="0">
@@ -360,7 +358,6 @@ print(f'COVERAGE PASSED: {rate:.1f}% >= {threshold}%')
 XMLEOF
 
                         echo "E2E Summary → Total: \$TOTAL | Passed: \$PASSED | Failed: \$FAILED"
-
                         if [ "\$FAILED" -gt "0" ]; then
                             echo "E2E FAILED in \$FAILED environment(s)"
                             exit 1
@@ -450,7 +447,7 @@ pdf = TestReport()
 pdf.set_auto_page_break(auto=True, margin=15)
 pdf.add_page()
 
-# ── Build Info ─────────────────────────────────────────────
+# Build Info
 pdf.set_font('Helvetica', 'B', 13)
 pdf.set_fill_color(236, 240, 241)
 pdf.cell(0, 9, 'Build Information', new_x='LMARGIN', new_y='NEXT', fill=True)
@@ -470,7 +467,7 @@ for k, v in [
     pdf.cell(0, 7, str(v), new_x='LMARGIN', new_y='NEXT')
 pdf.ln(4)
 
-# ── Test Summary Table ─────────────────────────────────────
+# Test Summary Table
 pdf.set_font('Helvetica', 'B', 13)
 pdf.set_fill_color(236, 240, 241)
 pdf.cell(0, 9, 'Test Summary', new_x='LMARGIN', new_y='NEXT', fill=True)
@@ -491,10 +488,10 @@ def suite_row(pdf, name, data):
     pdf.set_font('Helvetica', '', 10)
     pdf.set_fill_color(249, 249, 249)
     pdf.cell(50, 7, name, border=1, fill=True)
-    pdf.cell(25, 7, str(data['tests']),        border=1, align='C', fill=True)
-    pdf.cell(25, 7, str(passed),               border=1, align='C', fill=True)
-    pdf.cell(25, 7, str(data['failures']),     border=1, align='C', fill=True)
-    pdf.cell(25, 7, str(data.get('skipped',0)),border=1, align='C', fill=True)
+    pdf.cell(25, 7, str(data['tests']),         border=1, align='C', fill=True)
+    pdf.cell(25, 7, str(passed),                border=1, align='C', fill=True)
+    pdf.cell(25, 7, str(data['failures']),      border=1, align='C', fill=True)
+    pdf.cell(25, 7, str(data.get('skipped',0)), border=1, align='C', fill=True)
     pdf.set_fill_color(*c); pdf.set_text_color(255,255,255)
     pdf.cell(40, 7, 'PASS' if ok else 'FAIL', border=1, align='C', fill=True)
     pdf.set_text_color(0,0,0); pdf.ln()
@@ -514,7 +511,7 @@ pdf.cell(25, 8, '-',                 border=1, align='C', fill=True)
 pdf.cell(40, 8, 'PASS' if ok else 'FAIL', border=1, align='C', fill=True)
 pdf.set_text_color(0,0,0); pdf.ln(6)
 
-# ── Coverage ───────────────────────────────────────────────
+# Coverage
 pdf.set_font('Helvetica', 'B', 13)
 pdf.set_fill_color(236, 240, 241)
 pdf.cell(0, 9, 'Code Coverage', new_x='LMARGIN', new_y='NEXT', fill=True)
@@ -539,7 +536,7 @@ else:
     pdf.cell(0,7,'Coverage data not available', new_x='LMARGIN', new_y='NEXT')
 pdf.ln(4)
 
-# ── Test Case Details ──────────────────────────────────────
+# Test Case Details
 for sname, sdata in [('Unit Tests',unit),('Integration Tests',intg),('E2E Tests',e2e)]:
     if not sdata['cases']: continue
     pdf.set_font('Helvetica','B',12)
@@ -610,14 +607,8 @@ PYEOF
                 def notifier = new NotificationManager(this)
                 def details  = getBuildDetails(this)
                 details.changes = details.changes + " | ALL TESTS PASSED ✅"
-
-                // Send Slack with Quick Links
                 notifier.sendSlack('SUCCESS', details)
-
-                // Upload PDF to Slack
                 uploadPdfToSlack("✅ Test Report: ${SERVICE} v${VERSION} — ALL TESTS PASSED")
-
-                // Send Email
                 notifier.sendEmail('SUCCESS', details)
             }
         }
@@ -627,14 +618,8 @@ PYEOF
                 def notifier = new NotificationManager(this)
                 def details  = getBuildDetails(this)
                 details.changes = details.changes + " | TESTS FAILED ❌"
-
-                // Send Slack with Quick Links
                 notifier.sendSlack('FAILURE', details)
-
-                // Upload PDF to Slack
                 uploadPdfToSlack("❌ Test Report: ${SERVICE} v${VERSION} — FAILED")
-
-                // Send Email
                 notifier.sendEmail('FAILURE', details)
             }
         }
@@ -644,14 +629,8 @@ PYEOF
                 def notifier = new NotificationManager(this)
                 def details  = getBuildDetails(this)
                 details.changes = details.changes + " | UNSTABLE ⚠️"
-
-                // Send Slack with Quick Links
                 notifier.sendSlack('UNSTABLE', details)
-
-                // Upload PDF to Slack
                 uploadPdfToSlack("⚠️ Test Report: ${SERVICE} v${VERSION} — UNSTABLE")
-
-                // Send Email
                 notifier.sendEmail('UNSTABLE', details)
             }
         }
@@ -676,14 +655,11 @@ def uploadPdfToSlack(String comment) {
                         -F initial_comment="${comment}" \
                         -H "Authorization: Bearer \$SLACK_TOKEN" \
                         https://slack.com/api/files.upload)
-                    echo "Slack upload response: \$RESPONSE"
+                    echo "Slack upload: \$RESPONSE"
                     echo "\$RESPONSE" | python3 -c "
 import sys, json
 r = json.load(sys.stdin)
-if r.get('ok'):
-    print('PDF uploaded to Slack ✅')
-else:
-    print(f'Slack upload warning: {r.get(\\\"error\\\", \\\"unknown\\\")}')
+print('PDF uploaded to Slack ✅' if r.get('ok') else f'Warning: {r.get(\\\"error\\\",\\\"unknown\\\")}')
 "
                 else
                     echo "PDF not found — skipping Slack upload"
@@ -696,7 +672,7 @@ else:
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  HELPER — Build Details Map
+//  HELPER — Build Details Map (with all Quick Link URLs)
 // ═══════════════════════════════════════════════════════════════
 def getBuildDetails(def ctx) {
     String changes = 'No changes'
@@ -709,16 +685,25 @@ def getBuildDetails(def ctx) {
         changes = 'Could not fetch changes'
     }
 
+    // Build all URLs from Jenkins BUILD_URL
+    String buildUrl    = ctx.env.BUILD_URL ?: 'http://localhost:8080'
+    String testsUrl    = "${buildUrl}testReport/"
+    String coverageUrl = "${buildUrl}coverage/"
+    String pdfUrl      = "${buildUrl}artifact/test-reports/test-report.pdf"
+
     return [
-        jobName    : ctx.env.JOB_NAME        ?: 'Unknown Job',
-        buildNumber: ctx.env.BUILD_NUMBER    ?: '0',
-        buildUrl   : ctx.env.BUILD_URL       ?: 'http://localhost:8080',
-        branch     : ctx.env.GIT_BRANCH      ?: 'master',
-        service    : ctx.params.SERVICE      ?: 'unknown',
-        version    : ctx.params.VERSION      ?: '0.0.0',
-        environment: ctx.params.ENVIRONMENT  ?: 'staging',
-        duration   : ctx.currentBuild.durationString ?: 'N/A',
-        changes    : changes,
-        recipients : ctx.params.RECIPIENTS   ?: 'YOUR_EMAIL@gmail.com'
+        jobName     : ctx.env.JOB_NAME       ?: 'Unknown Job',
+        buildNumber : ctx.env.BUILD_NUMBER   ?: '0',
+        buildUrl    : buildUrl,
+        testsUrl    : testsUrl,        // ← Quick Link: Test Results
+        coverageUrl : coverageUrl,     // ← Quick Link: Coverage Report
+        artifactsUrl: pdfUrl,          // ← Quick Link: Download PDF Report
+        branch      : ctx.env.GIT_BRANCH     ?: 'master',
+        service     : ctx.params.SERVICE     ?: 'unknown',
+        version     : ctx.params.VERSION     ?: '0.0.0',
+        environment : ctx.params.ENVIRONMENT ?: 'staging',
+        duration    : ctx.currentBuild.durationString ?: 'N/A',
+        changes     : changes,
+        recipients  : ctx.params.RECIPIENTS  ?: 'YOUR_EMAIL@gmail.com'
     ]
 }
