@@ -93,7 +93,7 @@ pipeline {
                                 --cov-report=html:../../${COVERAGE_DIR}/html \
                                 --cov-report=term-missing \
                                 --cov-fail-under=${COVERAGE_MIN} \
-                                -v test_*.py *_test.py \
+                                -v test_*.py \
                                 2>&1 | tee ../../${REPORT_DIR}/unit/unit.log
 
                         elif [ -f package.json ]; then
@@ -186,7 +186,7 @@ print(f'PASSED: {rate:.1f}% >= ${COVERAGE_MIN}%')
                                     python3 -m pytest \
                                         --junitxml=../../${REPORT_DIR}/integration/integration-results.xml \
                                         -v -m integration \
-                                        test_*.py *_test.py \
+                                        test_*.py \
                                         2>&1 | tee ../../${REPORT_DIR}/integration/integration.log \
                                         || echo "Integration tests done"
                                 else
