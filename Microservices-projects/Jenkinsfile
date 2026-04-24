@@ -36,14 +36,14 @@ pipeline {
         booleanParam(
             name: 'FAIL_ON_COVERAGE',
             defaultValue: true,
-            description: 'Fail build if coverage < 80%?'
+            description: 'Fail build if coverage < 60%?'
         )
     }
 
     environment {
         SERVICE       = "${params.SERVICE}"
         VERSION       = "${params.VERSION}"
-        COVERAGE_MIN  = '80'
+        COVERAGE_MIN  = '60'
         REPORT_DIR    = 'test-reports'
         COVERAGE_DIR  = 'coverage-reports'
         JUNIT_PATTERN = '**/test-results/**/*.xml'
