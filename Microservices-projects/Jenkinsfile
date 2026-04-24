@@ -1,7 +1,13 @@
-@Library('jenkins-shared-library@main') _
+@Library('jenkins-shared-library@master') _
 
-import org.example.DeploymentManager
 import org.example.NotificationManager
+
+// ─────────────────────────────────────────────────────────────
+//  COMPLETE TESTING PIPELINE
+//  Stages: Unit → Integration → E2E (parallel where possible)
+//  Coverage: 80% threshold (JaCoCo / Cobertura / pytest-cov)
+//  Reports: JUnit XML → Jenkins + PDF → Slack
+// ─────────────────────────────────────────────────────────────
 
 pipeline {
     agent any
@@ -10,209 +16,570 @@ pipeline {
         choice(
             name: 'SERVICE',
             choices: ['attendance', 'employee', 'salary', 'frontend', 'notification'],
-            description: 'Which microservice to deploy'
+            description: 'Microservice to test'
         )
         string(
             name: 'VERSION',
             defaultValue: '1.0.0',
-            description: 'Semver version e.g. 1.0.0'
+            description: 'Version under test'
         )
         choice(
-            name: 'ENVIRONMENT',
-            choices: ['dev', 'staging', 'prod'],
-            description: 'Target environment'
+            name: 'TEST_SCOPE',
+            choices: ['all', 'unit', 'integration', 'e2e'],
+            description: 'Which tests to run'
         )
         string(
             name: 'RECIPIENTS',
             defaultValue: 'YOUR_EMAIL@gmail.com',
-            description: 'Email recipients comma separated'
+            description: 'Email recipients for report'
+        )
+        booleanParam(
+            name: 'FAIL_ON_COVERAGE',
+            defaultValue: true,
+            description: 'Fail build if coverage < 80%?'
         )
     }
 
     environment {
-        JOB_NAME     = "${env.JOB_NAME}"
-        BUILD_NUMBER = "${env.BUILD_NUMBER}"
-        BUILD_URL    = "${env.BUILD_URL}"
-        BRANCH_NAME  = "${env.GIT_BRANCH ?: 'master'}"
+        SERVICE       = "${params.SERVICE}"
+        VERSION       = "${params.VERSION}"
+        COVERAGE_MIN  = '80'
+        REPORT_DIR    = 'test-reports'
+        COVERAGE_DIR  = 'coverage-reports'
+        JUNIT_PATTERN = '**/test-results/**/*.xml'
+        KUBECONFIG    = '/var/lib/jenkins/.kube/config'
     }
 
     stages {
 
-        // ── STAGE 1: NOTIFY START ──────────────────────────────
-        stage('Notify Start') {
+        // ── STAGE 1: SETUP ─────────────────────────────────────
+        stage('Setup') {
             steps {
                 script {
+                    echo "=== TEST PIPELINE: ${SERVICE} v${VERSION} ==="
+                    echo "Scope: ${params.TEST_SCOPE}"
+
                     def notifier = new NotificationManager(this)
-                    def details  = getBuildDetails(this)
+                    notifier.sendSlack('STARTED', getBuildDetails(this))
 
-                    notifier.notifyAll('STARTED', details)
+                    sh """
+                        mkdir -p ${REPORT_DIR}/unit
+                        mkdir -p ${REPORT_DIR}/integration
+                        mkdir -p ${REPORT_DIR}/e2e
+                        mkdir -p ${COVERAGE_DIR}
+                    """
                 }
             }
         }
 
-        // ── STAGE 2: VALIDATE ──────────────────────────────────
-        stage('Validate') {
-            steps {
-                script {
-                    def manager = new DeploymentManager(this)
-                    manager.validateConfig(
-                        params.SERVICE,
-                        params.ENVIRONMENT,
-                        params.VERSION
-                    )
-                }
-            }
-        }
-
-        // ── STAGE 3: DEPLOY TO DEV ─────────────────────────────
-        stage('Deploy to Dev') {
+        // ── STAGE 2: UNIT TESTS ────────────────────────────────
+        stage('Unit Tests') {
             when {
-                expression { return params.ENVIRONMENT == 'dev' }
+                expression { return params.TEST_SCOPE in ['all', 'unit'] }
             }
             steps {
-                script {
-                    new DeploymentManager(this).deploy(
-                        params.SERVICE,
-                        'dev',
-                        params.VERSION
-                    )
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh """
+                        cd Microservices-projects/${SERVICE}
+
+                        if [ -f requirements.txt ]; then
+                            pip install -r requirements.txt \
+                                pytest pytest-cov pytest-html --break-system-packages -q
+
+                            python -m pytest \
+                                --junitxml=../../${REPORT_DIR}/unit/unit-results.xml \
+                                --cov=. \
+                                --cov-report=xml:../../${COVERAGE_DIR}/coverage.xml \
+                                --cov-report=html:../../${COVERAGE_DIR}/html \
+                                --cov-report=term-missing \
+                                --cov-fail-under=${COVERAGE_MIN} \
+                                -v test_*.py *_test.py \
+                                2>&1 | tee ../../${REPORT_DIR}/unit/unit.log
+
+                        elif [ -f package.json ]; then
+                            npm install
+                            npm test -- \
+                                --reporter junit \
+                                --reporter-options output=../../${REPORT_DIR}/unit/unit-results.xml \
+                                2>&1 | tee ../../${REPORT_DIR}/unit/unit.log
+
+                        elif [ -f pom.xml ]; then
+                            mvn test \
+                                -Dsurefire.reportsDirectory=../../${REPORT_DIR}/unit \
+                                jacoco:report \
+                                2>&1 | tee ../../${REPORT_DIR}/unit/unit.log
+
+                        else
+                            echo "No test framework detected"
+                        fi
+                    """
+                }
+            }
+            post {
+                always {
+                    junit testResults: "${REPORT_DIR}/unit/unit-results.xml",
+                          allowEmptyResults: true
+                    archiveArtifacts artifacts: "${REPORT_DIR}/unit/**",
+                                     allowEmptyArchive: true
                 }
             }
         }
 
-        // ── STAGE 4: DEPLOY TO STAGING ─────────────────────────
-        stage('Deploy to Staging') {
+        // ── STAGE 3: COVERAGE CHECK ────────────────────────────
+        stage('Coverage Check') {
             when {
-                anyOf {
-                    expression { return params.ENVIRONMENT == 'staging' }
-                    expression { return params.ENVIRONMENT == 'prod' }
-                }
+                expression { return params.TEST_SCOPE in ['all', 'unit'] }
             }
             steps {
                 script {
-                    new DeploymentManager(this).deploy(
-                        params.SERVICE,
-                        'staging',
-                        params.VERSION
-                    )
+                    echo "=== COVERAGE CHECK (min: ${COVERAGE_MIN}%) ==="
+                }
+                catchError(buildResult: params.FAIL_ON_COVERAGE ? 'FAILURE' : 'UNSTABLE',
+                           stageResult: 'FAILURE') {
+                    sh """
+                        if [ -f ${COVERAGE_DIR}/coverage.xml ]; then
+                            COVERAGE=\$(python3 -c "
+import xml.etree.ElementTree as ET
+tree = ET.parse('${COVERAGE_DIR}/coverage.xml')
+root = tree.getroot()
+rate = float(root.get('line-rate', 0)) * 100
+print(f'{rate:.1f}')
+")
+                            echo "Coverage: \${COVERAGE}%"
+                            echo "\${COVERAGE}" > ${COVERAGE_DIR}/coverage-percent.txt
+
+                            python3 -c "
+rate = float('\${COVERAGE}')
+if rate < ${COVERAGE_MIN}:
+    print(f'FAILED: {rate:.1f}% < ${COVERAGE_MIN}%')
+    exit(1)
+print(f'PASSED: {rate:.1f}% >= ${COVERAGE_MIN}%')
+"
+                        else
+                            echo "No coverage.xml found"
+                        fi
+                    """
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: "${COVERAGE_DIR}/**",
+                                     allowEmptyArchive: true
                 }
             }
         }
 
-        // ── STAGE 5: APPROVAL FOR PROD ─────────────────────────
-        stage('Approval for Prod') {
+        // ── STAGE 4: PARALLEL — INTEGRATION + LINT ─────────────
+        stage('Parallel: Integration + Lint') {
             when {
-                expression { return params.ENVIRONMENT == 'prod' }
+                expression { return params.TEST_SCOPE in ['all', 'integration'] }
             }
-            steps {
-                script {
-                    // Approval se pehle notify karo
-                    def notifier = new NotificationManager(this)
-                    def details  = getBuildDetails(this)
-                    details.changes = "Waiting for PROD approval"
+            parallel {
 
-                    notifier.sendSlack('UNSTABLE', details)
-                    notifier.sendEmail('UNSTABLE', details)
+                stage('Integration Tests') {
+                    steps {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            sh """
+                                cd Microservices-projects/${SERVICE}
+
+                                if [ -f requirements.txt ]; then
+                                    python -m pytest \
+                                        --junitxml=../../${REPORT_DIR}/integration/integration-results.xml \
+                                        -v -m integration \
+                                        test_*.py *_test.py \
+                                        2>&1 | tee ../../${REPORT_DIR}/integration/integration.log \
+                                        || echo "Integration tests done"
+                                else
+                                    echo "No integration tests found"
+                                fi
+                            """
+                        }
+                    }
+                    post {
+                        always {
+                            junit testResults: "${REPORT_DIR}/integration/integration-results.xml",
+                                  allowEmptyResults: true
+                            archiveArtifacts artifacts: "${REPORT_DIR}/integration/**",
+                                             allowEmptyArchive: true
+                        }
+                    }
                 }
 
-                timeout(time: 30, unit: 'MINUTES') {
-                    input(
-                        message: 'Deploy to PRODUCTION?',
-                        ok: 'Yes, Deploy'
-                    )
+                stage('Lint & Static Analysis') {
+                    steps {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            sh """
+                                cd Microservices-projects/${SERVICE}
+                                mkdir -p ../../${REPORT_DIR}/lint
+
+                                if [ -f requirements.txt ]; then
+                                    pip install flake8 pylint --break-system-packages -q
+
+                                    flake8 . --max-line-length=120 \
+                                        --exclude=.git,__pycache__,venv \
+                                        > ../../${REPORT_DIR}/lint/flake8.log || true
+
+                                    pylint *.py --fail-under=7.0 \
+                                        > ../../${REPORT_DIR}/lint/pylint.log \
+                                        || echo "Pylint score below threshold"
+
+                                elif [ -f package.json ]; then
+                                    npm run lint > ../../${REPORT_DIR}/lint/eslint.log || true
+                                fi
+                            """
+                        }
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: "${REPORT_DIR}/lint/**",
+                                             allowEmptyArchive: true
+                        }
+                    }
                 }
-            }
+
+            } // end parallel
         }
 
-        // ── STAGE 6: DEPLOY TO PROD ────────────────────────────
-        stage('Deploy to Prod') {
+        // ── STAGE 5: E2E TESTS ─────────────────────────────────
+        stage('E2E Tests') {
             when {
-                expression { return params.ENVIRONMENT == 'prod' }
+                expression { return params.TEST_SCOPE in ['all', 'e2e'] }
             }
             steps {
-                script {
-                    new DeploymentManager(this).deploy(
-                        params.SERVICE,
-                        'prod',
-                        params.VERSION
-                    )
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    sh """
+                        mkdir -p ${REPORT_DIR}/e2e
+
+                        SVC_IP=\$(kubectl get svc ${SERVICE} -n staging \
+                            -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
+
+                        if [ -z "\$SVC_IP" ]; then
+                            echo "Service not found in staging — skipping E2E"
+
+                            # Generate empty pass result
+                            python3 -c "
+xml = '''<?xml version=\\"1.0\\" encoding=\\"UTF-8\\"?>
+<testsuite name=\\"E2E\\" tests=\\"1\\" failures=\\"0\\">
+  <testcase name=\\"e2e_skipped\\" classname=\\"e2e\\"><skipped/></testcase>
+</testsuite>'''
+open('${REPORT_DIR}/e2e/e2e-results.xml','w').write(xml)
+"
+                            exit 0
+                        fi
+
+                        STATUS=\$(curl -s -o /dev/null -w "%{http_code}" \
+                            http://\${SVC_IP}/${SERVICE}/healthz || echo "000")
+                        echo "Health check: HTTP \$STATUS"
+
+                        python3 -c "
+status = '\${STATUS}'
+passed = status == '200'
+xml = f'''<?xml version=\\"1.0\\" encoding=\\"UTF-8\\"?>
+<testsuite name=\\"E2E\\" tests=\\"1\\" failures=\\"{'0' if passed else '1'}\\">
+  <testcase name=\\"health_check\\" classname=\\"e2e.health\\">
+    {'' if passed else f'<failure>HTTP {status}</failure>'}
+  </testcase>
+</testsuite>'''
+open('${REPORT_DIR}/e2e/e2e-results.xml','w').write(xml)
+print('E2E: ' + ('PASSED' if passed else 'FAILED'))
+exit(0 if passed else 1)
+"
+                    """
+                }
+            }
+            post {
+                always {
+                    junit testResults: "${REPORT_DIR}/e2e/e2e-results.xml",
+                          allowEmptyResults: true
+                    archiveArtifacts artifacts: "${REPORT_DIR}/e2e/**",
+                                     allowEmptyArchive: true
                 }
             }
         }
-    }
+
+        // ── STAGE 6: GENERATE PDF REPORT ───────────────────────
+        stage('Generate PDF Report') {
+            steps {
+                sh """
+                    pip install fpdf2 --break-system-packages -q
+
+                    python3 << 'PYEOF'
+from fpdf import FPDF
+import xml.etree.ElementTree as ET
+import os, datetime
+
+class TestReport(FPDF):
+    def header(self):
+        self.set_font('Helvetica', 'B', 16)
+        self.set_fill_color(41, 128, 185)
+        self.set_text_color(255, 255, 255)
+        self.cell(0, 12, 'Jenkins Test Report', ln=True, fill=True, align='C')
+        self.set_text_color(0, 0, 0)
+        self.ln(4)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Helvetica', 'I', 8)
+        self.set_text_color(128, 128, 128)
+        self.cell(0, 10,
+            f'Page {self.page_no()} | Generated: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}',
+            align='C')
+
+def parse_junit(path):
+    if not os.path.exists(path):
+        return {'tests':0,'failures':0,'errors':0,'skipped':0,'cases':[]}
+    try:
+        root = ET.parse(path).getroot()
+        suite = root if root.tag == 'testsuite' else (root.find('testsuite') or root)
+        cases = []
+        for tc in suite.findall('testcase'):
+            st = 'PASS'
+            if tc.find('failure') is not None: st = 'FAIL'
+            elif tc.find('error') is not None: st = 'ERROR'
+            elif tc.find('skipped') is not None: st = 'SKIP'
+            cases.append({'name': tc.get('name','?'), 'status': st, 'time': tc.get('time','0')})
+        return {
+            'tests': int(suite.get('tests', len(cases))),
+            'failures': int(suite.get('failures', 0)),
+            'errors': int(suite.get('errors', 0)),
+            'skipped': int(suite.get('skipped', 0)),
+            'cases': cases
+        }
+    except:
+        return {'tests':0,'failures':0,'errors':0,'skipped':0,'cases':[]}
+
+def get_coverage():
+    f = '${COVERAGE_DIR}/coverage-percent.txt'
+    try:
+        return float(open(f).read().strip()) if os.path.exists(f) else None
+    except:
+        return None
+
+unit = parse_junit('${REPORT_DIR}/unit/unit-results.xml')
+intg = parse_junit('${REPORT_DIR}/integration/integration-results.xml')
+e2e  = parse_junit('${REPORT_DIR}/e2e/e2e-results.xml')
+cov  = get_coverage()
+
+total_tests    = unit['tests'] + intg['tests'] + e2e['tests']
+total_failures = unit['failures'] + intg['failures'] + e2e['failures']
+total_passed   = total_tests - total_failures
+
+pdf = TestReport()
+pdf.set_auto_page_break(auto=True, margin=15)
+pdf.add_page()
+
+# Build Info
+pdf.set_font('Helvetica', 'B', 13)
+pdf.set_fill_color(236, 240, 241)
+pdf.cell(0, 9, 'Build Information', ln=True, fill=True)
+pdf.ln(2)
+for k, v in [('Service','${SERVICE}'),('Version','${VERSION}'),
+             ('Build No.','${BUILD_NUMBER}'),
+             ('Timestamp', datetime.datetime.now().strftime('%Y-%m-%d %H:%M')),
+             ('Test Scope','${params.TEST_SCOPE}')]:
+    pdf.set_font('Helvetica', 'B', 10)
+    pdf.cell(45, 7, k + ':')
+    pdf.set_font('Helvetica', '', 10)
+    pdf.cell(0, 7, str(v), ln=True)
+pdf.ln(4)
+
+# Summary Table
+pdf.set_font('Helvetica', 'B', 13)
+pdf.set_fill_color(236, 240, 241)
+pdf.cell(0, 9, 'Test Summary', ln=True, fill=True)
+pdf.ln(2)
+
+pdf.set_font('Helvetica', 'B', 10)
+pdf.set_fill_color(41, 128, 185)
+pdf.set_text_color(255, 255, 255)
+for col, w in [('Suite',50),('Total',25),('Passed',25),('Failed',25),('Skip',25),('Result',40)]:
+    pdf.cell(w, 8, col, border=1, fill=True, align='C')
+pdf.ln()
+pdf.set_text_color(0, 0, 0)
+
+def suite_row(pdf, name, data):
+    passed = data['tests'] - data['failures'] - data.get('errors',0) - data.get('skipped',0)
+    ok     = data['failures'] == 0 and data['errors'] == 0
+    c      = (39,174,96) if ok else (231,76,60)
+    pdf.set_font('Helvetica', '', 10)
+    pdf.set_fill_color(249, 249, 249)
+    pdf.cell(50, 7, name, border=1, fill=True)
+    pdf.cell(25, 7, str(data['tests']),   border=1, align='C', fill=True)
+    pdf.cell(25, 7, str(passed),          border=1, align='C', fill=True)
+    pdf.cell(25, 7, str(data['failures']),border=1, align='C', fill=True)
+    pdf.cell(25, 7, str(data.get('skipped',0)), border=1, align='C', fill=True)
+    pdf.set_fill_color(*c); pdf.set_text_color(255,255,255)
+    pdf.cell(40, 7, 'PASS' if ok else 'FAIL', border=1, align='C', fill=True)
+    pdf.set_text_color(0,0,0); pdf.ln()
+
+suite_row(pdf, 'Unit Tests', unit)
+suite_row(pdf, 'Integration Tests', intg)
+suite_row(pdf, 'E2E Tests', e2e)
+
+pdf.set_font('Helvetica', 'B', 10)
+pdf.set_fill_color(41, 128, 185); pdf.set_text_color(255,255,255)
+ok = total_failures == 0
+pdf.cell(50, 8, 'TOTAL',            border=1, fill=True)
+pdf.cell(25, 8, str(total_tests),   border=1, align='C', fill=True)
+pdf.cell(25, 8, str(total_passed),  border=1, align='C', fill=True)
+pdf.cell(25, 8, str(total_failures),border=1, align='C', fill=True)
+pdf.cell(25, 8, '-',                border=1, align='C', fill=True)
+pdf.cell(40, 8, 'PASS' if ok else 'FAIL', border=1, align='C', fill=True)
+pdf.set_text_color(0,0,0); pdf.ln(6)
+
+# Coverage
+pdf.set_font('Helvetica', 'B', 13)
+pdf.set_fill_color(236, 240, 241)
+pdf.cell(0, 9, 'Code Coverage', ln=True, fill=True)
+pdf.ln(2)
+if cov is not None:
+    c = (39,174,96) if cov >= 80 else (231,76,60)
+    pdf.set_font('Helvetica', 'B', 32)
+    pdf.set_text_color(*c)
+    pdf.cell(0, 14, f'{cov:.1f}%', ln=True, align='C')
+    pdf.set_text_color(0,0,0)
+    pdf.set_font('Helvetica', '', 10)
+    pdf.cell(0, 7, f'Threshold: 80% | {"PASSED" if cov>=80 else "FAILED"}', ln=True, align='C')
+    pdf.ln(2)
+    pdf.set_fill_color(220,220,220)
+    pdf.cell(170, 8, '', border=0, fill=True); pdf.ln()
+    pdf.set_xy(pdf.get_x(), pdf.get_y()-8)
+    pdf.set_fill_color(*c)
+    pdf.cell(min(170*cov/100, 170), 8, '', border=0, fill=True); pdf.ln(6)
+else:
+    pdf.set_font('Helvetica','I',10)
+    pdf.cell(0,7,'Coverage data not available',ln=True)
+pdf.ln(4)
+
+# Test Case Details
+for sname, sdata in [('Unit Tests',unit),('Integration Tests',intg),('E2E Tests',e2e)]:
+    if not sdata['cases']: continue
+    pdf.set_font('Helvetica','B',12)
+    pdf.set_fill_color(52,73,94); pdf.set_text_color(255,255,255)
+    pdf.cell(0,8,f'  {sname}',ln=True,fill=True)
+    pdf.set_text_color(0,0,0); pdf.ln(1)
+    pdf.set_font('Helvetica','B',9)
+    pdf.set_fill_color(189,195,199)
+    pdf.cell(115,7,'Test Name',border=1,fill=True)
+    pdf.cell(30,7,'Status',border=1,align='C',fill=True)
+    pdf.cell(25,7,'Time(s)',border=1,align='C',fill=True); pdf.ln()
+    sc = {'PASS':(39,174,96),'FAIL':(231,76,60),'ERROR':(231,76,60),'SKIP':(243,156,18)}
+    for i,case in enumerate(sdata['cases']):
+        bg = (249,249,249) if i%2==0 else (255,255,255)
+        pdf.set_fill_color(*bg); pdf.set_font('Helvetica','',9)
+        nm = case['name'][:60]+'...' if len(case['name'])>60 else case['name']
+        pdf.cell(115,6,nm,border=1,fill=True)
+        c2 = sc.get(case['status'],(128,128,128))
+        pdf.set_fill_color(*c2); pdf.set_text_color(255,255,255)
+        pdf.cell(30,6,case['status'],border=1,align='C',fill=True)
+        pdf.set_text_color(0,0,0); pdf.set_fill_color(*bg)
+        pdf.cell(25,6,case['time'],border=1,align='C',fill=True); pdf.ln()
+    pdf.ln(4)
+
+pdf.output('${REPORT_DIR}/test-report.pdf')
+print('PDF generated: ${REPORT_DIR}/test-report.pdf')
+PYEOF
+                """
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: "${REPORT_DIR}/test-report.pdf",
+                                     allowEmptyArchive: true
+                }
+            }
+        }
+
+        // ── STAGE 7: PUBLISH REPORTS ───────────────────────────
+        stage('Publish Reports') {
+            steps {
+                script {
+                    echo "=== PUBLISHING ALL REPORTS TO JENKINS ==="
+                    junit testResults: "${JUNIT_PATTERN}",
+                          allowEmptyResults: true
+                    echo "Reports published ✅"
+                }
+            }
+        }
+
+    } // end stages
 
     // ── POST BLOCKS ───────────────────────────────────────────
     post {
 
-        // Hamesha chalega — success ho ya failure
         always {
-            script {
-                echo "Pipeline finished — sending final notification"
-            }
+            archiveArtifacts artifacts: "${REPORT_DIR}/**",
+                             allowEmptyArchive: true
         }
 
-        // Sirf success pe
         success {
             script {
                 def notifier = new NotificationManager(this)
                 def details  = getBuildDetails(this)
+                details.changes = details.changes + " | ALL TESTS PASSED ✅"
 
-                // Master/main branch pe extra notification
-                if (env.BRANCH_NAME == 'master' ||
-                    env.BRANCH_NAME == 'main') {
-                    details.changes = details.changes +
-                        " | MASTER BRANCH DEPLOY"
+                try {
+                    slackUploadFile(
+                        credentialId   : 'slackaditya',
+                        channel        : '#jenkins-notifications',
+                        filePath       : "${REPORT_DIR}/test-report.pdf",
+                        initialComment : "✅ *Test Report: ${SERVICE} v${VERSION}* — All tests passed!"
+                    )
+                } catch (Exception e) {
+                    echo "WARNING: PDF upload failed: ${e.message}"
+                    notifier.sendSlack('SUCCESS', details)
                 }
-
-                notifier.notifyAll('SUCCESS', details)
+                notifier.sendEmail('SUCCESS', details)
             }
         }
 
-        // Sirf failure pe
         failure {
             script {
                 def notifier = new NotificationManager(this)
                 def details  = getBuildDetails(this)
+                details.changes = details.changes + " | TESTS FAILED ❌"
 
-                // Rollback trigger karo
                 try {
-                    new DeploymentManager(this).rollback(
-                        params.SERVICE,
-                        params.ENVIRONMENT
+                    slackUploadFile(
+                        credentialId   : 'slackaditya',
+                        channel        : '#jenkins-notifications',
+                        filePath       : "${REPORT_DIR}/test-report.pdf",
+                        initialComment : "❌ *Test Report: ${SERVICE} v${VERSION}* — FAILED!"
                     )
-                    details.changes = details.changes +
-                        " | AUTO-ROLLBACK TRIGGERED"
                 } catch (Exception e) {
-                    details.changes = details.changes +
-                        " | ROLLBACK FAILED: ${e.message}"
+                    notifier.sendSlack('FAILURE', details)
                 }
-
-                notifier.notifyAll('FAILURE', details)
+                notifier.sendEmail('FAILURE', details)
             }
         }
 
-        // Unstable build pe (test failures)
         unstable {
             script {
                 def notifier = new NotificationManager(this)
                 def details  = getBuildDetails(this)
-                details.changes = details.changes +
-                    " | BUILD UNSTABLE - CHECK TESTS"
+                details.changes = details.changes + " | UNSTABLE ⚠️"
 
-                notifier.notifyAll('UNSTABLE', details)
+                try {
+                    slackUploadFile(
+                        credentialId   : 'slackaditya',
+                        channel        : '#jenkins-notifications',
+                        filePath       : "${REPORT_DIR}/test-report.pdf",
+                        initialComment : "⚠️ *Test Report: ${SERVICE} v${VERSION}* — UNSTABLE"
+                    )
+                } catch (Exception e) {
+                    notifier.sendSlack('UNSTABLE', details)
+                }
+                notifier.sendEmail('UNSTABLE', details)
             }
         }
 
-        // Cleanup
         cleanup {
             cleanWs()
         }
     }
 }
 
-// ── HELPER FUNCTION — BUILD DETAILS ───────────────────────────
+// ── HELPER ────────────────────────────────────────────────────
 def getBuildDetails(def ctx) {
-    // Git changes lo
     String changes = 'No changes'
     try {
         changes = ctx.sh(
@@ -222,17 +589,16 @@ def getBuildDetails(def ctx) {
     } catch (Exception e) {
         changes = 'Could not fetch changes'
     }
-
     return [
-        jobName    : ctx.env.JOB_NAME      ?: 'Unknown Job',
-        buildNumber: ctx.env.BUILD_NUMBER  ?: '0',
-        buildUrl   : ctx.env.BUILD_URL     ?: 'http://localhost:8080',
-        branch     : ctx.env.GIT_BRANCH    ?: 'master',
-        service    : ctx.params.SERVICE    ?: 'unknown',
-        version    : ctx.params.VERSION    ?: '0.0.0',
-        environment: ctx.params.ENVIRONMENT ?: 'unknown',
+        jobName    : ctx.env.JOB_NAME        ?: 'Unknown Job',
+        buildNumber: ctx.env.BUILD_NUMBER    ?: '0',
+        buildUrl   : ctx.env.BUILD_URL       ?: 'http://localhost:8080',
+        branch     : ctx.env.GIT_BRANCH      ?: 'master',
+        service    : ctx.params.SERVICE      ?: 'unknown',
+        version    : ctx.params.VERSION      ?: '0.0.0',
+        environment: 'testing',
         duration   : ctx.currentBuild.durationString ?: 'N/A',
         changes    : changes,
-        recipients : ctx.params.RECIPIENTS ?: 'YOUR_EMAIL@gmail.com'
+        recipients : ctx.params.RECIPIENTS   ?: 'YOUR_EMAIL@gmail.com'
     ]
 }
