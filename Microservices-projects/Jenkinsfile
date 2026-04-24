@@ -69,8 +69,11 @@ pipeline {
                     echo " Environment: ${ENVIRONMENT}"
                     echo "═══════════════════════════════════════"
 
+                    // FIX 1: Send BOTH Slack AND Email on STARTED
                     def notifier = new NotificationManager(this)
-                    notifier.sendSlack('STARTED', getBuildDetails(this))
+                    def details  = getBuildDetails(this)
+                    notifier.sendSlack('STARTED', details)
+                    notifier.sendEmail('STARTED', details)
 
                     sh """
                         mkdir -p ${REPORT_DIR}/unit
@@ -610,6 +613,7 @@ PYEOF
                 notifier.sendSlack('SUCCESS', details)
                 uploadPdfToSlack("✅ Test Report: ${SERVICE} v${VERSION} — ALL TESTS PASSED")
                 notifier.sendEmail('SUCCESS', details)
+                notifier.sendTeams('SUCCESS', details)
             }
         }
 
@@ -621,6 +625,7 @@ PYEOF
                 notifier.sendSlack('FAILURE', details)
                 uploadPdfToSlack("❌ Test Report: ${SERVICE} v${VERSION} — FAILED")
                 notifier.sendEmail('FAILURE', details)
+                notifier.sendTeams('FAILURE', details)
             }
         }
 
@@ -632,6 +637,7 @@ PYEOF
                 notifier.sendSlack('UNSTABLE', details)
                 uploadPdfToSlack("⚠️ Test Report: ${SERVICE} v${VERSION} — UNSTABLE")
                 notifier.sendEmail('UNSTABLE', details)
+                notifier.sendTeams('UNSTABLE', details)
             }
         }
 
@@ -673,6 +679,7 @@ print('PDF uploaded to Slack ✅' if r.get('ok') else f'Warning: {r.get(\\\"erro
 
 // ═══════════════════════════════════════════════════════════════
 //  HELPER — Build Details Map (with all Quick Link URLs)
+//  FIX 2: Use JENKINS_URL as fallback so links are never localhost
 // ═══════════════════════════════════════════════════════════════
 def getBuildDetails(def ctx) {
     String changes = 'No changes'
@@ -685,8 +692,11 @@ def getBuildDetails(def ctx) {
         changes = 'Could not fetch changes'
     }
 
-    // Build all URLs from Jenkins BUILD_URL
-    String buildUrl    = ctx.env.BUILD_URL ?: 'http://localhost:8080'
+    // FIX 2: Build a reliable URL — prefer BUILD_URL, fall back to JENKINS_URL + path
+    String buildUrl = ctx.env.BUILD_URL
+        ?: "${ctx.env.JENKINS_URL ?: 'http://localhost:8080'}job/${ctx.env.JOB_NAME}/${ctx.env.BUILD_NUMBER}/"
+
+    // Construct all quick-link URLs from the resolved buildUrl
     String testsUrl    = "${buildUrl}testReport/"
     String coverageUrl = "${buildUrl}coverage/"
     String pdfUrl      = "${buildUrl}artifact/test-reports/test-report.pdf"
