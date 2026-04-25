@@ -5,7 +5,7 @@ import org.example.NotificationManager
 // ═══════════════════════════════════════════════════════════════
 //  COMPLETE TESTING PIPELINE — PRODUCTION READY
 //  Unit → Coverage → Parallel(Integration + Lint) → E2E
-//  Reports: JUnit + Coverage + PDF → Slack (with Quick Links)
+//  Reports: JUnit + Coverage + PDF → Slack + Email (with Quick Links)
 // ═══════════════════════════════════════════════════════════════
 
 pipeline {
@@ -65,15 +65,13 @@ pipeline {
                 script {
                     echo "═══════════════════════════════════════"
                     echo " TEST PIPELINE: ${SERVICE} v${VERSION}"
-                    echo " Scope     : ${params.TEST_SCOPE}"
+                    echo " Scope      : ${params.TEST_SCOPE}"
                     echo " Environment: ${ENVIRONMENT}"
                     echo "═══════════════════════════════════════"
 
-                    // FIX 1: Send BOTH Slack AND Email on STARTED
                     def notifier = new NotificationManager(this)
                     def details  = getBuildDetails(this)
-                    notifier.sendSlack('STARTED', details)
-                    notifier.sendEmail('STARTED', details)
+                    notifier.notifyAll('STARTED', details)
 
                     sh """
                         mkdir -p ${REPORT_DIR}/unit
@@ -277,97 +275,97 @@ print(f'COVERAGE PASSED: {rate:.1f}% >= {threshold}%')
                 expression { return params.TEST_SCOPE in ['all', 'e2e'] }
             }
             steps {
-                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                    sh """
-                        mkdir -p ${REPORT_DIR}/e2e
+                sh """
+                    mkdir -p ${REPORT_DIR}/e2e
 
-                        # Determine environments to test
-                        case "${ENVIRONMENT}" in
-                            dev)     ENVS="dev" ;;
-                            staging) ENVS="staging" ;;
-                            prod)    ENVS="staging prod" ;;
-                            *)       ENVS="staging" ;;
-                        esac
+                    # Determine environments to test
+                    case "${ENVIRONMENT}" in
+                        dev)     ENVS="dev" ;;
+                        staging) ENVS="staging" ;;
+                        prod)    ENVS="staging prod" ;;
+                        *)       ENVS="staging" ;;
+                    esac
 
-                        echo "E2E environments: \$ENVS"
-                        TOTAL=0; PASSED=0; FAILED=0; XML_CASES=""
+                    echo "E2E environments: \$ENVS"
+                    TOTAL=0; PASSED=0; FAILED=0; XML_CASES=""
 
-                        for ENV in \$ENVS; do
-                            echo "=== E2E: ${SERVICE} in \$ENV ==="
+                    for ENV in \$ENVS; do
+                        echo "=== E2E: ${SERVICE} in \$ENV ==="
 
-                            # Find pod (blue → green → any)
+                        # Find pod (blue → green → any)
+                        POD=\$(kubectl get pods -n \$ENV \
+                            -l app=${SERVICE},slot=blue \
+                            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+
+                        if [ -z "\$POD" ]; then
                             POD=\$(kubectl get pods -n \$ENV \
-                                -l app=${SERVICE},slot=blue \
+                                -l app=${SERVICE},slot=green \
                                 -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+                        fi
 
-                            if [ -z "\$POD" ]; then
-                                POD=\$(kubectl get pods -n \$ENV \
-                                    -l app=${SERVICE},slot=green \
-                                    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-                            fi
+                        if [ -z "\$POD" ]; then
+                            POD=\$(kubectl get pods -n \$ENV \
+                                -l app=${SERVICE} \
+                                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+                        fi
 
-                            if [ -z "\$POD" ]; then
-                                POD=\$(kubectl get pods -n \$ENV \
-                                    -l app=${SERVICE} \
-                                    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-                            fi
-
-                            if [ -z "\$POD" ]; then
-                                echo "No pod found in \$ENV — skipping"
-                                TOTAL=\$((TOTAL+1))
-                                XML_CASES="\$XML_CASES
-  <testcase name='e2e_health_\$ENV' classname='e2e.\$ENV'>
-    <skipped>No pod found in \$ENV</skipped>
-  </testcase>"
-                                continue
-                            fi
-
-                            echo "Pod: \$POD"
-
-                            # Health check with 5 retries
-                            STATUS="000"
-                            for i in 1 2 3 4 5; do
-                                STATUS=\$(kubectl exec -n \$ENV \$POD \
-                                    -- curl -s -o /dev/null \
-                                    -w "%{http_code}" \
-                                    http://localhost:8081/${SERVICE}/healthz \
-                                    2>/dev/null || echo "000")
-                                echo "Attempt \$i [\$ENV]: HTTP \$STATUS"
-                                if [ "\$STATUS" = "200" ]; then break; fi
-                                sleep 5
-                            done
-
+                        # ── FAIL BUILD if no pod found ────────────
+                        if [ -z "\$POD" ]; then
+                            echo "ERROR: No pod found for ${SERVICE} in \$ENV — failing build"
                             TOTAL=\$((TOTAL+1))
-                            if [ "\$STATUS" = "200" ]; then
-                                PASSED=\$((PASSED+1))
-                                echo "E2E PASSED: \$ENV ✅"
-                                XML_CASES="\$XML_CASES
+                            FAILED=\$((FAILED+1))
+                            XML_CASES="\$XML_CASES
+  <testcase name='e2e_health_\$ENV' classname='e2e.\$ENV'>
+    <failure message='No pod found'>No pod found for ${SERVICE} in namespace \$ENV</failure>
+  </testcase>"
+                            continue
+                        fi
+
+                        echo "Pod: \$POD"
+
+                        # Health check with 5 retries
+                        STATUS="000"
+                        for i in 1 2 3 4 5; do
+                            STATUS=\$(kubectl exec -n \$ENV \$POD \
+                                -- curl -s -o /dev/null \
+                                -w "%{http_code}" \
+                                http://localhost:8081/${SERVICE}/healthz \
+                                2>/dev/null || echo "000")
+                            echo "Attempt \$i [\$ENV]: HTTP \$STATUS"
+                            if [ "\$STATUS" = "200" ]; then break; fi
+                            sleep 5
+                        done
+
+                        TOTAL=\$((TOTAL+1))
+                        if [ "\$STATUS" = "200" ]; then
+                            PASSED=\$((PASSED+1))
+                            echo "E2E PASSED: \$ENV ✅"
+                            XML_CASES="\$XML_CASES
   <testcase name='e2e_health_\$ENV' classname='e2e.\$ENV'/>"
-                            else
-                                FAILED=\$((FAILED+1))
-                                echo "E2E FAILED: \$ENV ❌ (HTTP \$STATUS)"
-                                XML_CASES="\$XML_CASES
+                        else
+                            FAILED=\$((FAILED+1))
+                            echo "E2E FAILED: \$ENV ❌ (HTTP \$STATUS)"
+                            XML_CASES="\$XML_CASES
   <testcase name='e2e_health_\$ENV' classname='e2e.\$ENV'>
     <failure message='HTTP \$STATUS'>Health check failed: HTTP \$STATUS in \$ENV</failure>
   </testcase>"
-                            fi
-                        done
+                        fi
+                    done
 
-                        cat > ${REPORT_DIR}/e2e/e2e-results.xml << XMLEOF
+                    cat > ${REPORT_DIR}/e2e/e2e-results.xml << XMLEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <testsuite name="E2E-${SERVICE}" tests="\$TOTAL" failures="\$FAILED" skipped="0">
 \$XML_CASES
 </testsuite>
 XMLEOF
 
-                        echo "E2E Summary → Total: \$TOTAL | Passed: \$PASSED | Failed: \$FAILED"
-                        if [ "\$FAILED" -gt "0" ]; then
-                            echo "E2E FAILED in \$FAILED environment(s)"
-                            exit 1
-                        fi
-                        echo "All E2E tests PASSED ✅"
-                    """
-                }
+                    echo "E2E Summary → Total: \$TOTAL | Passed: \$PASSED | Failed: \$FAILED"
+                    if [ "\$FAILED" -gt "0" ]; then
+                        echo "E2E FAILED in \$FAILED environment(s) — failing build ❌"
+                        exit 1
+                    fi
+                    echo "All E2E tests PASSED ✅"
+                """
             }
             post {
                 always {
@@ -610,10 +608,8 @@ PYEOF
                 def notifier = new NotificationManager(this)
                 def details  = getBuildDetails(this)
                 details.changes = details.changes + " | ALL TESTS PASSED ✅"
-                notifier.sendSlack('SUCCESS', details)
+                notifier.notifyAll('SUCCESS', details)
                 uploadPdfToSlack("✅ Test Report: ${SERVICE} v${VERSION} — ALL TESTS PASSED")
-                notifier.sendEmail('SUCCESS', details)
-                notifier.sendTeams('SUCCESS', details)
             }
         }
 
@@ -622,10 +618,8 @@ PYEOF
                 def notifier = new NotificationManager(this)
                 def details  = getBuildDetails(this)
                 details.changes = details.changes + " | TESTS FAILED ❌"
-                notifier.sendSlack('FAILURE', details)
+                notifier.notifyAll('FAILURE', details)
                 uploadPdfToSlack("❌ Test Report: ${SERVICE} v${VERSION} — FAILED")
-                notifier.sendEmail('FAILURE', details)
-                notifier.sendTeams('FAILURE', details)
             }
         }
 
@@ -634,10 +628,8 @@ PYEOF
                 def notifier = new NotificationManager(this)
                 def details  = getBuildDetails(this)
                 details.changes = details.changes + " | UNSTABLE ⚠️"
-                notifier.sendSlack('UNSTABLE', details)
+                notifier.notifyAll('UNSTABLE', details)
                 uploadPdfToSlack("⚠️ Test Report: ${SERVICE} v${VERSION} — UNSTABLE")
-                notifier.sendEmail('UNSTABLE', details)
-                notifier.sendTeams('UNSTABLE', details)
             }
         }
 
@@ -679,7 +671,6 @@ print('PDF uploaded to Slack ✅' if r.get('ok') else f'Warning: {r.get(\\\"erro
 
 // ═══════════════════════════════════════════════════════════════
 //  HELPER — Build Details Map (with all Quick Link URLs)
-//  FIX 2: Use JENKINS_URL as fallback so links are never localhost
 // ═══════════════════════════════════════════════════════════════
 def getBuildDetails(def ctx) {
     String changes = 'No changes'
@@ -692,11 +683,10 @@ def getBuildDetails(def ctx) {
         changes = 'Could not fetch changes'
     }
 
-    // FIX 2: Build a reliable URL — prefer BUILD_URL, fall back to JENKINS_URL + path
+    // Prefer BUILD_URL; fall back to JENKINS_URL + path so links are never localhost
     String buildUrl = ctx.env.BUILD_URL
         ?: "${ctx.env.JENKINS_URL ?: 'http://localhost:8080'}job/${ctx.env.JOB_NAME}/${ctx.env.BUILD_NUMBER}/"
 
-    // Construct all quick-link URLs from the resolved buildUrl
     String testsUrl    = "${buildUrl}testReport/"
     String coverageUrl = "${buildUrl}coverage/"
     String pdfUrl      = "${buildUrl}artifact/test-reports/test-report.pdf"
@@ -705,9 +695,9 @@ def getBuildDetails(def ctx) {
         jobName     : ctx.env.JOB_NAME       ?: 'Unknown Job',
         buildNumber : ctx.env.BUILD_NUMBER   ?: '0',
         buildUrl    : buildUrl,
-        testsUrl    : testsUrl,        // ← Quick Link: Test Results
-        coverageUrl : coverageUrl,     // ← Quick Link: Coverage Report
-        artifactsUrl: pdfUrl,          // ← Quick Link: Download PDF Report
+        testsUrl    : testsUrl,
+        coverageUrl : coverageUrl,
+        artifactsUrl: pdfUrl,
         branch      : ctx.env.GIT_BRANCH     ?: 'master',
         service     : ctx.params.SERVICE     ?: 'unknown',
         version     : ctx.params.VERSION     ?: '0.0.0',
