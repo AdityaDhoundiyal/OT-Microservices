@@ -62,25 +62,26 @@ pipeline {
     }
 
     environment {
-        SERVICE       = "${params.SERVICE}"
-        VERSION       = "${params.VERSION}"
-        ENVIRONMENT   = "${params.ENVIRONMENT}"
-        COVERAGE_MIN  = '60'
-        REPORT_DIR    = 'test-reports'
-        COVERAGE_DIR  = 'coverage-reports'
-        JUNIT_PATTERN = "${REPORT_DIR}/**/*.xml"
-        KUBECONFIG    = '/var/lib/jenkins/.kube/config'
-        SLACK_CHANNEL = '#jenkins-notifications'
-        SLACK_CRED_ID = 'slackaditya'
-        // K8s manifest paths (already exist in repo)
-        K8S_DEV     = 'Microservices-projects/kubernetes/dev/attendance-k8s.yaml'
-        K8S_STAGING = 'Microservices-projects/kubernetes/staging/attendance-bluegree.yaml'
-        K8S_PROD    = 'Microservices-projects/kubernetes/prod/attendance-k8s.yaml'
-        // Health check config
-        HEALTH_CHECK_RETRIES  = '10'
-        HEALTH_CHECK_INTERVAL = '10'
-        HEALTH_PORT           = '8081'
-    }
+    SERVICE       = "${params.SERVICE}"
+    VERSION       = "${params.VERSION}"
+    ENVIRONMENT   = "${params.ENVIRONMENT}"
+    COVERAGE_MIN  = '60'
+    REPORT_DIR    = 'test-reports'
+    COVERAGE_DIR  = 'coverage-reports'
+    JUNIT_PATTERN = "${REPORT_DIR}/**/*.xml"
+    KUBECONFIG    = '/var/lib/jenkins/.kube/config'
+    SLACK_CHANNEL = '#jenkins-notifications'
+    SLACK_CRED_ID = 'slackaditya'
+    K8S_DEV       = 'Microservices-projects/kubernetes/dev/attendance-k8s.yaml'
+    K8S_STAGING   = 'Microservices-projects/kubernetes/staging/attendance-bluegree.yaml'
+    K8S_PROD      = 'Microservices-projects/kubernetes/prod/attendance-k8s.yaml'
+    HEALTH_CHECK_RETRIES  = '10'
+    HEALTH_CHECK_INTERVAL = '10'
+    HEALTH_PORT           = '8081'
+    // ── Fix: tell minikube where its home is for jenkins user ──
+    MINIKUBE_HOME = '/var/lib/jenkins/.minikube'
+    HOME          = '/var/lib/jenkins'
+}
 
     stages {
 
