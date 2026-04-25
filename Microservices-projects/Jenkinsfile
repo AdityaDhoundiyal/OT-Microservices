@@ -5,9 +5,9 @@ import org.example.NotificationManager
 // ═══════════════════════════════════════════════════════════════
 //  COMPLETE TESTING + MULTI-ENV DEPLOYMENT PIPELINE
 //  Unit → Coverage → Parallel(Integration + Lint) → E2E
+//  → Build & Load Docker Image (Minikube)
 //  → Deploy Dev (auto) → Approval → Deploy Staging
 //  → Approval → Blue-Green Prod → Health Check → Rollback
-//  Reports: JUnit + Coverage + PDF → Slack + Email (Quick Links)
 // ═══════════════════════════════════════════════════════════════
 
 pipeline {
@@ -17,12 +17,12 @@ pipeline {
         choice(
             name: 'SERVICE',
             choices: ['attendance', 'employee', 'salary', 'frontend', 'notification'],
-            description: 'Microservice to test'
+            description: 'Microservice to test and deploy'
         )
         string(
             name: 'VERSION',
             defaultValue: '1.0.0',
-            description: 'Version under test (semver e.g. 1.0.0)'
+            description: 'Version under test/deploy (semver e.g. 1.0.0)'
         )
         choice(
             name: 'TEST_SCOPE',
@@ -32,7 +32,7 @@ pipeline {
         choice(
             name: 'ENVIRONMENT',
             choices: ['staging', 'dev', 'prod'],
-            description: 'Target environment for E2E tests'
+            description: 'Target environment for E2E tests and deployment'
         )
         string(
             name: 'RECIPIENTS',
@@ -44,26 +44,20 @@ pipeline {
             defaultValue: true,
             description: 'Fail build if coverage below threshold?'
         )
-        // ── Assignment-5: new deployment parameters ─────────────
         booleanParam(
             name: 'RUN_DEPLOYMENT',
             defaultValue: false,
-            description: 'Run deployment stages after tests? (Dev auto → Staging approval → Prod Blue-Green)'
-        )
-        string(
-            name: 'DOCKER_IMAGE',
-            defaultValue: 'your-registry/SERVICE:VERSION',
-            description: 'Full Docker image to deploy (e.g. registry.example.com/attendance:1.0.0)'
+            description: 'Run deployment stages after tests?'
         )
         string(
             name: 'STAGING_APPROVAL_TIMEOUT',
             defaultValue: '30',
-            description: 'Minutes to wait for Staging manual approval before aborting'
+            description: 'Minutes to wait for Staging manual approval'
         )
         string(
             name: 'PROD_APPROVAL_TIMEOUT',
             defaultValue: '30',
-            description: 'Minutes to wait for Prod Blue-Green manual approval before aborting'
+            description: 'Minutes to wait for Prod Blue-Green manual approval'
         )
     }
 
@@ -78,7 +72,11 @@ pipeline {
         KUBECONFIG    = '/var/lib/jenkins/.kube/config'
         SLACK_CHANNEL = '#jenkins-notifications'
         SLACK_CRED_ID = 'slackaditya'
-        // ── Assignment-5: deployment env vars ───────────────────
+        // K8s manifest paths (already exist in repo)
+        K8S_DEV     = 'Microservices-projects/kubernetes/dev/attendance-k8s.yaml'
+        K8S_STAGING = 'Microservices-projects/kubernetes/staging/attendance-bluegree.yaml'
+        K8S_PROD    = 'Microservices-projects/kubernetes/prod/attendance-k8s.yaml'
+        // Health check config
         HEALTH_CHECK_RETRIES  = '10'
         HEALTH_CHECK_INTERVAL = '10'
         HEALTH_PORT           = '8081'
@@ -120,12 +118,8 @@ pipeline {
                 catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                     sh """
                         cd Microservices-projects/${SERVICE}
-
-                        # ── Python services ──────────────────────
                         if [ -f requirements.txt ]; then
-                            pip3 install -r requirements.txt \
-                                pytest pytest-cov pytest-html -q
-
+                            pip3 install -r requirements.txt pytest pytest-cov pytest-html -q
                             python3 -m pytest \
                                 --junitxml=../../${REPORT_DIR}/unit/unit-results.xml \
                                 --cov=. \
@@ -135,22 +129,17 @@ pipeline {
                                 --cov-fail-under=${COVERAGE_MIN} \
                                 -v test_*.py \
                                 2>&1 | tee ../../${REPORT_DIR}/unit/unit.log
-
-                        # ── Node/Frontend services ───────────────
                         elif [ -f package.json ]; then
                             npm install
                             npm test -- \
                                 --reporter junit \
                                 --reporter-options output=../../${REPORT_DIR}/unit/unit-results.xml \
                                 2>&1 | tee ../../${REPORT_DIR}/unit/unit.log
-
-                        # ── Java services ────────────────────────
                         elif [ -f pom.xml ]; then
                             mvn test \
                                 -Dsurefire.reportsDirectory=../../${REPORT_DIR}/unit \
                                 jacoco:report \
                                 2>&1 | tee ../../${REPORT_DIR}/unit/unit.log
-
                         else
                             echo "No test framework detected — skipping"
                         fi
@@ -190,7 +179,6 @@ print(f'{rate:.1f}')
 ")
                             echo "Coverage: \${COVERAGE}%"
                             echo "\${COVERAGE}" > ${COVERAGE_DIR}/coverage-percent.txt
-
                             python3 -c "
 rate = float('\${COVERAGE}')
 threshold = ${COVERAGE_MIN}
@@ -220,13 +208,11 @@ print(f'COVERAGE PASSED: {rate:.1f}% >= {threshold}%')
             }
             parallel {
 
-                // ── 4a: INTEGRATION TESTS ────────────────────────
                 stage('Integration Tests') {
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                             sh """
                                 cd Microservices-projects/${SERVICE}
-
                                 if [ -f requirements.txt ]; then
                                     python3 -m pytest \
                                         --junitxml=../../${REPORT_DIR}/integration/integration-results.xml \
@@ -254,30 +240,25 @@ print(f'COVERAGE PASSED: {rate:.1f}% >= {threshold}%')
                     }
                 }
 
-                // ── 4b: LINT & STATIC ANALYSIS ───────────────────
                 stage('Lint & Static Analysis') {
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                             sh """
                                 cd Microservices-projects/${SERVICE}
-
                                 if [ -f requirements.txt ]; then
                                     pip3 install flake8 pylint -q
-
                                     echo "--- flake8 ---"
                                     flake8 . \
                                         --max-line-length=120 \
                                         --exclude=.git,__pycache__,venv \
                                         > ../../${REPORT_DIR}/lint/flake8.log 2>&1 || true
                                     cat ../../${REPORT_DIR}/lint/flake8.log
-
                                     echo "--- pylint ---"
                                     pylint *.py \
                                         --fail-under=7.0 \
                                         > ../../${REPORT_DIR}/lint/pylint.log 2>&1 \
                                         || echo "Pylint score below threshold"
                                     cat ../../${REPORT_DIR}/lint/pylint.log
-
                                 elif [ -f package.json ]; then
                                     npm run lint \
                                         > ../../${REPORT_DIR}/lint/eslint.log 2>&1 || true
@@ -293,7 +274,7 @@ print(f'COVERAGE PASSED: {rate:.1f}% >= {threshold}%')
                     }
                 }
 
-            } // end parallel
+            }
         }
 
         // ── STAGE 5: E2E TESTS ──────────────────────────────────
@@ -304,65 +285,43 @@ print(f'COVERAGE PASSED: {rate:.1f}% >= {threshold}%')
             steps {
                 sh """
                     mkdir -p ${REPORT_DIR}/e2e
-
-                    # Determine environments to test
                     case "${ENVIRONMENT}" in
                         dev)     ENVS="dev" ;;
                         staging) ENVS="staging" ;;
                         prod)    ENVS="staging prod" ;;
                         *)       ENVS="staging" ;;
                     esac
-
                     echo "E2E environments: \$ENVS"
                     TOTAL=0; PASSED=0; FAILED=0; XML_CASES=""
-
                     for ENV in \$ENVS; do
                         echo "=== E2E: ${SERVICE} in \$ENV ==="
-
-                        # Find pod (blue → green → any)
                         POD=\$(kubectl get pods -n \$ENV \
                             -l app=${SERVICE},slot=blue \
                             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-
                         if [ -z "\$POD" ]; then
                             POD=\$(kubectl get pods -n \$ENV \
                                 -l app=${SERVICE},slot=green \
                                 -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
                         fi
-
                         if [ -z "\$POD" ]; then
-                            POD=\$(kubectl get pods -n \$ENV \
-                                -l app=${SERVICE} \
-                                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-                        fi
-
-                        # ── FAIL BUILD if no pod found ────────────
-                        if [ -z "\$POD" ]; then
-                            echo "ERROR: No pod found for ${SERVICE} in \$ENV — failing build"
-                            TOTAL=\$((TOTAL+1))
-                            FAILED=\$((FAILED+1))
+                            TOTAL=\$((TOTAL+1)); FAILED=\$((FAILED+1))
                             XML_CASES="\$XML_CASES
   <testcase name='e2e_health_\$ENV' classname='e2e.\$ENV'>
-    <failure message='No pod found'>No pod found for ${SERVICE} in namespace \$ENV</failure>
+    <failure message='No pod found'>No pod found for ${SERVICE} in \$ENV</failure>
   </testcase>"
                             continue
                         fi
-
                         echo "Pod: \$POD"
-
-                        # Health check with 5 retries
                         STATUS="000"
                         for i in 1 2 3 4 5; do
                             STATUS=\$(kubectl exec -n \$ENV \$POD \
-                                -- curl -s -o /dev/null \
-                                -w "%{http_code}" \
+                                -- curl -s -o /dev/null -w "%{http_code}" \
                                 http://localhost:8081/${SERVICE}/healthz \
                                 2>/dev/null || echo "000")
                             echo "Attempt \$i [\$ENV]: HTTP \$STATUS"
                             if [ "\$STATUS" = "200" ]; then break; fi
                             sleep 5
                         done
-
                         TOTAL=\$((TOTAL+1))
                         if [ "\$STATUS" = "200" ]; then
                             PASSED=\$((PASSED+1))
@@ -374,23 +333,18 @@ print(f'COVERAGE PASSED: {rate:.1f}% >= {threshold}%')
                             echo "E2E FAILED: \$ENV ❌ (HTTP \$STATUS)"
                             XML_CASES="\$XML_CASES
   <testcase name='e2e_health_\$ENV' classname='e2e.\$ENV'>
-    <failure message='HTTP \$STATUS'>Health check failed: HTTP \$STATUS in \$ENV</failure>
+    <failure message='HTTP \$STATUS'>Health check failed in \$ENV</failure>
   </testcase>"
                         fi
                     done
-
                     cat > ${REPORT_DIR}/e2e/e2e-results.xml << XMLEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <testsuite name="E2E-${SERVICE}" tests="\$TOTAL" failures="\$FAILED" skipped="0">
 \$XML_CASES
 </testsuite>
 XMLEOF
-
                     echo "E2E Summary → Total: \$TOTAL | Passed: \$PASSED | Failed: \$FAILED"
-                    if [ "\$FAILED" -gt "0" ]; then
-                        echo "E2E FAILED in \$FAILED environment(s) — failing build ❌"
-                        exit 1
-                    fi
+                    if [ "\$FAILED" -gt "0" ]; then exit 1; fi
                     echo "All E2E tests PASSED ✅"
                 """
             }
@@ -409,7 +363,6 @@ XMLEOF
             steps {
                 sh """
                     pip3 install fpdf2 -q
-
                     python3 << 'PYEOF'
 from fpdf import FPDF
 import xml.etree.ElementTree as ET
@@ -423,7 +376,6 @@ class TestReport(FPDF):
         self.cell(0, 12, 'Jenkins Test Report', new_x='LMARGIN', new_y='NEXT', fill=True, align='C')
         self.set_text_color(0, 0, 0)
         self.ln(4)
-
     def footer(self):
         self.set_y(-15)
         self.set_font('Helvetica', 'I', 8)
@@ -466,7 +418,6 @@ unit = parse_junit('${REPORT_DIR}/unit/unit-results.xml')
 intg = parse_junit('${REPORT_DIR}/integration/integration-results.xml')
 e2e  = parse_junit('${REPORT_DIR}/e2e/e2e-results.xml')
 cov  = get_coverage()
-
 total_tests    = unit['tests'] + intg['tests'] + e2e['tests']
 total_failures = unit['failures'] + intg['failures'] + e2e['failures']
 total_passed   = total_tests - total_failures
@@ -474,8 +425,6 @@ total_passed   = total_tests - total_failures
 pdf = TestReport()
 pdf.set_auto_page_break(auto=True, margin=15)
 pdf.add_page()
-
-# Build Info
 pdf.set_font('Helvetica', 'B', 13)
 pdf.set_fill_color(236, 240, 241)
 pdf.cell(0, 9, 'Build Information', new_x='LMARGIN', new_y='NEXT', fill=True)
@@ -485,110 +434,13 @@ for k, v in [
     ('Version',     '${VERSION}'),
     ('Environment', '${ENVIRONMENT}'),
     ('Build No.',   '${BUILD_NUMBER}'),
-    ('Branch',      '${GIT_BRANCH}' or 'master'),
     ('Timestamp',   datetime.datetime.now().strftime('%Y-%m-%d %H:%M')),
     ('Test Scope',  '${params.TEST_SCOPE}'),
 ]:
-    pdf.set_font('Helvetica', 'B', 10)
-    pdf.cell(45, 7, k + ':')
+    pdf.set_font('Helvetica', 'B', 10); pdf.cell(45, 7, k + ':')
     pdf.set_font('Helvetica', '', 10)
     pdf.cell(0, 7, str(v), new_x='LMARGIN', new_y='NEXT')
 pdf.ln(4)
-
-# Test Summary Table
-pdf.set_font('Helvetica', 'B', 13)
-pdf.set_fill_color(236, 240, 241)
-pdf.cell(0, 9, 'Test Summary', new_x='LMARGIN', new_y='NEXT', fill=True)
-pdf.ln(2)
-
-pdf.set_font('Helvetica', 'B', 10)
-pdf.set_fill_color(41, 128, 185)
-pdf.set_text_color(255, 255, 255)
-for col, w in [('Suite',50),('Total',25),('Passed',25),('Failed',25),('Skip',25),('Result',40)]:
-    pdf.cell(w, 8, col, border=1, fill=True, align='C')
-pdf.ln()
-pdf.set_text_color(0, 0, 0)
-
-def suite_row(pdf, name, data):
-    passed = data['tests'] - data['failures'] - data.get('errors',0) - data.get('skipped',0)
-    ok     = data['failures'] == 0 and data['errors'] == 0
-    c      = (39,174,96) if ok else (231,76,60)
-    pdf.set_font('Helvetica', '', 10)
-    pdf.set_fill_color(249, 249, 249)
-    pdf.cell(50, 7, name, border=1, fill=True)
-    pdf.cell(25, 7, str(data['tests']),         border=1, align='C', fill=True)
-    pdf.cell(25, 7, str(passed),                border=1, align='C', fill=True)
-    pdf.cell(25, 7, str(data['failures']),      border=1, align='C', fill=True)
-    pdf.cell(25, 7, str(data.get('skipped',0)), border=1, align='C', fill=True)
-    pdf.set_fill_color(*c); pdf.set_text_color(255,255,255)
-    pdf.cell(40, 7, 'PASS' if ok else 'FAIL', border=1, align='C', fill=True)
-    pdf.set_text_color(0,0,0); pdf.ln()
-
-suite_row(pdf, 'Unit Tests',        unit)
-suite_row(pdf, 'Integration Tests', intg)
-suite_row(pdf, 'E2E Tests',         e2e)
-
-pdf.set_font('Helvetica', 'B', 10)
-pdf.set_fill_color(41, 128, 185); pdf.set_text_color(255,255,255)
-ok = total_failures == 0
-pdf.cell(50, 8, 'TOTAL',             border=1, fill=True)
-pdf.cell(25, 8, str(total_tests),    border=1, align='C', fill=True)
-pdf.cell(25, 8, str(total_passed),   border=1, align='C', fill=True)
-pdf.cell(25, 8, str(total_failures), border=1, align='C', fill=True)
-pdf.cell(25, 8, '-',                 border=1, align='C', fill=True)
-pdf.cell(40, 8, 'PASS' if ok else 'FAIL', border=1, align='C', fill=True)
-pdf.set_text_color(0,0,0); pdf.ln(6)
-
-# Coverage
-pdf.set_font('Helvetica', 'B', 13)
-pdf.set_fill_color(236, 240, 241)
-pdf.cell(0, 9, 'Code Coverage', new_x='LMARGIN', new_y='NEXT', fill=True)
-pdf.ln(2)
-if cov is not None:
-    c = (39,174,96) if cov >= 60 else (231,76,60)
-    pdf.set_font('Helvetica', 'B', 32)
-    pdf.set_text_color(*c)
-    pdf.cell(0, 14, f'{cov:.1f}%', new_x='LMARGIN', new_y='NEXT', align='C')
-    pdf.set_text_color(0,0,0)
-    pdf.set_font('Helvetica', '', 10)
-    pdf.cell(0, 7, f'Threshold: 60% | {"PASSED" if cov>=60 else "FAILED"}',
-             new_x='LMARGIN', new_y='NEXT', align='C')
-    pdf.ln(2)
-    pdf.set_fill_color(220,220,220)
-    pdf.cell(170, 8, '', border=0, fill=True); pdf.ln()
-    pdf.set_xy(pdf.get_x(), pdf.get_y()-8)
-    pdf.set_fill_color(*c)
-    pdf.cell(min(170*cov/100, 170), 8, '', border=0, fill=True); pdf.ln(6)
-else:
-    pdf.set_font('Helvetica','I',10)
-    pdf.cell(0,7,'Coverage data not available', new_x='LMARGIN', new_y='NEXT')
-pdf.ln(4)
-
-# Test Case Details
-for sname, sdata in [('Unit Tests',unit),('Integration Tests',intg),('E2E Tests',e2e)]:
-    if not sdata['cases']: continue
-    pdf.set_font('Helvetica','B',12)
-    pdf.set_fill_color(52,73,94); pdf.set_text_color(255,255,255)
-    pdf.cell(0,8,f'  {sname}', new_x='LMARGIN', new_y='NEXT', fill=True)
-    pdf.set_text_color(0,0,0); pdf.ln(1)
-    pdf.set_font('Helvetica','B',9)
-    pdf.set_fill_color(189,195,199)
-    pdf.cell(115,7,'Test Name',border=1,fill=True)
-    pdf.cell(30, 7,'Status',  border=1,align='C',fill=True)
-    pdf.cell(25, 7,'Time(s)', border=1,align='C',fill=True); pdf.ln()
-    sc = {'PASS':(39,174,96),'FAIL':(231,76,60),'ERROR':(231,76,60),'SKIP':(243,156,18)}
-    for i,case in enumerate(sdata['cases']):
-        bg = (249,249,249) if i%2==0 else (255,255,255)
-        pdf.set_fill_color(*bg); pdf.set_font('Helvetica','',9)
-        nm = case['name'][:60]+'...' if len(case['name'])>60 else case['name']
-        pdf.cell(115,6,nm,border=1,fill=True)
-        c2 = sc.get(case['status'],(128,128,128))
-        pdf.set_fill_color(*c2); pdf.set_text_color(255,255,255)
-        pdf.cell(30,6,case['status'],border=1,align='C',fill=True)
-        pdf.set_text_color(0,0,0); pdf.set_fill_color(*bg)
-        pdf.cell(25,6,case['time'],border=1,align='C',fill=True); pdf.ln()
-    pdf.ln(4)
-
 os.makedirs('${REPORT_DIR}', exist_ok=True)
 pdf.output('${REPORT_DIR}/test-report.pdf')
 print('PDF generated: ${REPORT_DIR}/test-report.pdf')
@@ -616,85 +468,116 @@ PYEOF
         }
 
         // ════════════════════════════════════════════════════════
-        //  ASSIGNMENT-5: MULTI-ENVIRONMENT DEPLOYMENT STAGES
-        //  Stages 8-12 are purely additive. Nothing above is touched.
-        //  All stages are gated by RUN_DEPLOYMENT=true so the
-        //  testing-only workflow is completely unaffected.
+        //  DEPLOYMENT STAGES (gated by RUN_DEPLOYMENT=true)
+        //  Uses YOUR existing YAML files — no new manifests needed
+        //  Image built locally → loaded into Minikube → applied
         // ════════════════════════════════════════════════════════
 
-        // ── STAGE 8: DEPLOY TO DEV (Automatic) ─────────────────
-        // Dev deploys automatically — no manual approval needed.
-        // milestone(1) cancels any older queued build waiting here
-        // so only the latest commit ever reaches Dev first.
+        // ── STAGE 8: BUILD DOCKER IMAGE & LOAD INTO MINIKUBE ───
+        stage('Build & Load Docker Image') {
+            when {
+                expression { return params.RUN_DEPLOYMENT == true }
+            }
+            steps {
+                script {
+                    // Image name always = SERVICE:VERSION (local, no registry)
+                    env.DOCKER_IMAGE_RESOLVED = "${params.SERVICE}:${params.VERSION}"
+                    echo "=== Image: ${env.DOCKER_IMAGE_RESOLVED} ==="
+                }
+                sh """
+                    echo "--- Building Docker image on Jenkins daemon ---"
+                    cd Microservices-projects/${params.SERVICE}
+                    docker build -t ${env.DOCKER_IMAGE_RESOLVED} .
+                    echo "Build complete ✅"
+
+                    echo "--- Loading image into Minikube ---"
+                    minikube image load ${env.DOCKER_IMAGE_RESOLVED}
+                    echo "Loaded into Minikube ✅"
+
+                    echo "--- Verifying image inside Minikube ---"
+                    minikube image ls | grep "${params.SERVICE}" \
+                        && echo "Image confirmed ✅" \
+                        || echo "WARNING: image not found in minikube image ls"
+                """
+            }
+        }
+
+        // ── STAGE 9: DEPLOY TO DEV (Automatic) ─────────────────
+        // Uses: Microservices-projects/kubernetes/dev/attendance-k8s.yaml
+        // Blue-Green already defined in YAML — just update image + apply
         stage('Deploy to Dev') {
             when {
                 expression { return params.RUN_DEPLOYMENT == true }
             }
             steps {
                 script {
-                    // Milestone 1 — concurrency control
                     milestone(1)
-
                     echo "═══════════════════════════════════════"
                     echo " DEPLOYING ${SERVICE} v${VERSION} → DEV"
                     echo "═══════════════════════════════════════"
-
                     def notifier = new NotificationManager(this)
                     def details  = getBuildDetails(this)
                     details.changes = details.changes + " | Deploying to DEV 🚀"
                     notifier.notifyAll('STARTED', details)
                 }
                 sh """
-                    echo "--- Applying Kubernetes manifests to dev namespace ---"
+                    echo "--- Detecting live slot in dev ---"
+                    LIVE_SLOT=\$(kubectl get service attendance -n dev \
+                        -o jsonpath='{.spec.selector.slot}' 2>/dev/null || echo 'blue')
+                    NEW_SLOT=\$([ "\$LIVE_SLOT" = "blue" ] && echo "green" || echo "blue")
+                    echo "Live: \$LIVE_SLOT → Deploying to: \$NEW_SLOT"
 
-                    # Update container image in the existing deployment
-                    kubectl set image deployment/${SERVICE} \
-                        ${SERVICE}=${params.DOCKER_IMAGE} \
-                        -n dev \
-                        --record
+                    echo "--- Patching image in YAML for \$NEW_SLOT slot ---"
+                    # Update image in the existing YAML and apply
+                    sed "s|image: attendance:.*|image: ${env.DOCKER_IMAGE_RESOLVED}|g" \
+                        ${K8S_DEV} | kubectl apply -f -
 
-                    # Wait for all pods to roll over (timeout: 3 min)
-                    kubectl rollout status deployment/${SERVICE} \
-                        -n dev \
-                        --timeout=180s
+                    echo "--- Waiting for \$NEW_SLOT rollout ---"
+                    kubectl rollout status deployment/attendance-\$NEW_SLOT \
+                        -n dev --timeout=180s
 
                     echo "Dev rollout complete ✅"
                 """
                 script {
-                    // ── Health check via httpRequest (kubectl exec + curl) ──
-                    // Uses the same pattern as E2E stage for consistency
-                    echo "--- Health-checking dev after deploy ---"
+                    // Health check new slot
+                    def newSlot = sh(
+                        script: """LIVE=\$(kubectl get service attendance -n dev \
+                            -o jsonpath='{.spec.selector.slot}' 2>/dev/null || echo 'blue')
+                            [ "\$LIVE" = "blue" ] && echo "green" || echo "blue" """,
+                        returnStdout: true
+                    ).trim()
+
                     def devPod = sh(
                         script: """kubectl get pods -n dev \
-                            -l app=${SERVICE} \
+                            -l app=attendance,slot=${newSlot} \
                             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo ''""",
                         returnStdout: true
                     ).trim()
 
                     if (!devPod) {
-                        error("Health check failed: no pod found in dev after deployment")
+                        sh "kubectl rollout undo deployment/attendance-${newSlot} -n dev || true"
+                        error("Dev health check failed: no pod found in ${newSlot} slot")
                     }
 
                     def devHealthy = false
                     for (int i = 1; i <= env.HEALTH_CHECK_RETRIES.toInteger(); i++) {
-                        def httpStatus = sh(
+                        def status = sh(
                             script: """kubectl exec -n dev ${devPod} \
                                 -- curl -s -o /dev/null -w "%{http_code}" \
                                 http://localhost:${env.HEALTH_PORT}/${SERVICE}/healthz \
                                 2>/dev/null || echo '000'""",
                             returnStdout: true
                         ).trim()
-                        echo "Dev health attempt ${i}/${env.HEALTH_CHECK_RETRIES}: HTTP ${httpStatus}"
-                        if (httpStatus == '200') { devHealthy = true; break }
+                        echo "Dev health attempt ${i}/${env.HEALTH_CHECK_RETRIES}: HTTP ${status}"
+                        if (status == '200') { devHealthy = true; break }
                         sleep(env.HEALTH_CHECK_INTERVAL.toInteger())
                     }
 
                     if (!devHealthy) {
-                        // ── Automatic rollback on health failure ──
-                        echo "Dev health check failed — rolling back automatically ⚠️"
                         sh """
-                            kubectl rollout undo deployment/${SERVICE} -n dev
-                            kubectl rollout status deployment/${SERVICE} -n dev --timeout=120s
+                            kubectl rollout undo deployment/attendance-${newSlot} -n dev
+                            kubectl rollout status deployment/attendance-${newSlot} \
+                                -n dev --timeout=120s
                         """
                         def notifier = new NotificationManager(this)
                         def details  = getBuildDetails(this)
@@ -703,7 +586,13 @@ PYEOF
                         error("Dev deployment rolled back — health check failed ❌")
                     }
 
-                    echo "Dev health check passed ✅"
+                    // Cutover: switch service selector to new slot
+                    sh """
+                        kubectl patch service attendance -n dev \
+                            -p '{"spec":{"selector":{"slot":"${newSlot}"}}}'
+                        echo "Dev traffic switched to ${newSlot} ✅"
+                    """
+
                     def notifier = new NotificationManager(this)
                     def details  = getBuildDetails(this)
                     details.changes = details.changes + " | Dev deploy SUCCESS ✅"
@@ -712,29 +601,19 @@ PYEOF
             }
         }
 
-        // ── STAGE 9: APPROVAL FOR STAGING ──────────────────────
-        // Manual gate before promoting to Staging.
-        // Notifies team on Slack + Email with build URL so approver
-        // can review Dev logs before clicking Approve.
+        // ── STAGE 10: APPROVAL FOR STAGING ─────────────────────
         stage('Approval: Deploy to Staging') {
             when {
                 expression { return params.RUN_DEPLOYMENT == true }
             }
             steps {
                 script {
-                    // Milestone 2 — if two builds reach this gate,
-                    // the older one is automatically aborted
                     milestone(2)
-
                     def notifier = new NotificationManager(this)
                     def details  = getBuildDetails(this)
                     details.changes = details.changes + " | Waiting for STAGING approval ⏳"
                     notifier.notifyAll('UNSTABLE', details)
-
-                    echo "═══════════════════════════════════════════════════════"
-                    echo " Waiting for manual approval → STAGING"
-                    echo " Timeout: ${params.STAGING_APPROVAL_TIMEOUT} minutes"
-                    echo "═══════════════════════════════════════════════════════"
+                    echo "Waiting for Staging approval (timeout: ${params.STAGING_APPROVAL_TIMEOUT}m)"
                 }
                 timeout(time: params.STAGING_APPROVAL_TIMEOUT.toInteger(), unit: 'MINUTES') {
                     input(
@@ -750,9 +629,8 @@ PYEOF
             }
         }
 
-        // ── STAGE 10: DEPLOY TO STAGING ─────────────────────────
-        // Standard rolling deploy to staging with health check
-        // and automatic rollback on failure.
+        // ── STAGE 11: DEPLOY TO STAGING ─────────────────────────
+        // Uses: Microservices-projects/kubernetes/staging/attendance-bluegree.yaml
         stage('Deploy to Staging') {
             when {
                 expression { return params.RUN_DEPLOYMENT == true }
@@ -762,67 +640,79 @@ PYEOF
                     echo "════════════════════════════════════════════"
                     echo " DEPLOYING ${SERVICE} v${VERSION} → STAGING"
                     echo "════════════════════════════════════════════"
-
                     def notifier = new NotificationManager(this)
                     def details  = getBuildDetails(this)
                     details.changes = details.changes + " | Deploying to STAGING 🚀"
                     notifier.notifyAll('STARTED', details)
                 }
                 sh """
-                    echo "--- Applying manifests to staging namespace ---"
+                    echo "--- Detecting live slot in staging ---"
+                    LIVE_SLOT=\$(kubectl get service attendance -n staging \
+                        -o jsonpath='{.spec.selector.slot}' 2>/dev/null || echo 'blue')
+                    NEW_SLOT=\$([ "\$LIVE_SLOT" = "blue" ] && echo "green" || echo "blue")
+                    echo "Live: \$LIVE_SLOT → Deploying to: \$NEW_SLOT"
 
-                    kubectl set image deployment/${SERVICE} \
-                        ${SERVICE}=${params.DOCKER_IMAGE} \
-                        -n staging \
-                        --record
+                    echo "--- Applying staging manifests ---"
+                    sed "s|image: attendance:.*|image: ${env.DOCKER_IMAGE_RESOLVED}|g" \
+                        ${K8S_STAGING} | kubectl apply -f -
 
-                    kubectl rollout status deployment/${SERVICE} \
-                        -n staging \
-                        --timeout=180s
-
+                    kubectl rollout status deployment/attendance-\$NEW_SLOT \
+                        -n staging --timeout=180s
                     echo "Staging rollout complete ✅"
                 """
                 script {
-                    echo "--- Health-checking staging after deploy ---"
+                    def newSlot = sh(
+                        script: """LIVE=\$(kubectl get service attendance -n staging \
+                            -o jsonpath='{.spec.selector.slot}' 2>/dev/null || echo 'blue')
+                            [ "\$LIVE" = "blue" ] && echo "green" || echo "blue" """,
+                        returnStdout: true
+                    ).trim()
+
                     def stagingPod = sh(
                         script: """kubectl get pods -n staging \
-                            -l app=${SERVICE} \
+                            -l app=attendance,slot=${newSlot} \
                             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo ''""",
                         returnStdout: true
                     ).trim()
 
                     if (!stagingPod) {
-                        error("Health check failed: no pod found in staging after deployment")
+                        sh "kubectl rollout undo deployment/attendance-${newSlot} -n staging || true"
+                        error("Staging health check failed: no pod found")
                     }
 
                     def stagingHealthy = false
                     for (int i = 1; i <= env.HEALTH_CHECK_RETRIES.toInteger(); i++) {
-                        def httpStatus = sh(
+                        def status = sh(
                             script: """kubectl exec -n staging ${stagingPod} \
                                 -- curl -s -o /dev/null -w "%{http_code}" \
                                 http://localhost:${env.HEALTH_PORT}/${SERVICE}/healthz \
                                 2>/dev/null || echo '000'""",
                             returnStdout: true
                         ).trim()
-                        echo "Staging health attempt ${i}/${env.HEALTH_CHECK_RETRIES}: HTTP ${httpStatus}"
-                        if (httpStatus == '200') { stagingHealthy = true; break }
+                        echo "Staging health attempt ${i}/${env.HEALTH_CHECK_RETRIES}: HTTP ${status}"
+                        if (status == '200') { stagingHealthy = true; break }
                         sleep(env.HEALTH_CHECK_INTERVAL.toInteger())
                     }
 
                     if (!stagingHealthy) {
-                        echo "Staging health check failed — rolling back automatically ⚠️"
                         sh """
-                            kubectl rollout undo deployment/${SERVICE} -n staging
-                            kubectl rollout status deployment/${SERVICE} -n staging --timeout=120s
+                            kubectl rollout undo deployment/attendance-${newSlot} -n staging
+                            kubectl rollout status deployment/attendance-${newSlot} \
+                                -n staging --timeout=120s
                         """
                         def notifier = new NotificationManager(this)
                         def details  = getBuildDetails(this)
                         details.changes = details.changes + " | Staging ROLLED BACK ❌"
                         notifier.notifyAll('FAILURE', details)
-                        error("Staging deployment rolled back — health check failed ❌")
+                        error("Staging deployment rolled back ❌")
                     }
 
-                    echo "Staging health check passed ✅"
+                    sh """
+                        kubectl patch service attendance -n staging \
+                            -p '{"spec":{"selector":{"slot":"${newSlot}"}}}'
+                        echo "Staging traffic switched to ${newSlot} ✅"
+                    """
+
                     def notifier = new NotificationManager(this)
                     def details  = getBuildDetails(this)
                     details.changes = details.changes + " | Staging deploy SUCCESS ✅"
@@ -831,28 +721,19 @@ PYEOF
             }
         }
 
-        // ── STAGE 11: APPROVAL FOR PRODUCTION ──────────────────
-        // Second human gate — only reached after staging health check passes.
-        // Uses a separate timeout parameter from staging.
+        // ── STAGE 12: APPROVAL FOR PRODUCTION ──────────────────
         stage('Approval: Blue-Green Deploy to Prod') {
             when {
                 expression { return params.RUN_DEPLOYMENT == true }
             }
             steps {
                 script {
-                    // Milestone 3 — only ONE build may proceed to prod at a time;
-                    // the older queued build is aborted automatically
                     milestone(3)
-
                     def notifier = new NotificationManager(this)
                     def details  = getBuildDetails(this)
-                    details.changes = details.changes + " | Waiting for PROD Blue-Green approval ⏳"
+                    details.changes = details.changes + " | Waiting for PROD approval ⏳"
                     notifier.notifyAll('UNSTABLE', details)
-
-                    echo "══════════════════════════════════════════════════════"
-                    echo " Waiting for manual approval → PROD Blue-Green"
-                    echo " Timeout: ${params.PROD_APPROVAL_TIMEOUT} minutes"
-                    echo "══════════════════════════════════════════════════════"
+                    echo "Waiting for Prod approval (timeout: ${params.PROD_APPROVAL_TIMEOUT}m)"
                 }
                 timeout(time: params.PROD_APPROVAL_TIMEOUT.toInteger(), unit: 'MINUTES') {
                     input(
@@ -868,17 +749,15 @@ PYEOF
             }
         }
 
-        // ── STAGE 12: BLUE-GREEN DEPLOY TO PROD ────────────────
-        //
+        // ── STAGE 13: BLUE-GREEN DEPLOY TO PROD ────────────────
+        // Uses: Microservices-projects/kubernetes/prod/attendance-k8s.yaml
         // Strategy:
-        //  1. Detect which slot (blue/green) is currently live via Service selector
-        //  2. Deploy the new image to the INACTIVE slot
-        //  3. Health-check the inactive slot (10 retries × 10s)
-        //  4. PASS  → patch Service selector → traffic switches to new slot (cutover)
-        //             old slot scaled to 1 replica (fast manual rollback reserve)
-        //  5. FAIL  → do NOT touch Service selector; new slot scaled to 0 and
-        //             rolled back via kubectl rollout undo (zero downtime rollback)
-        //
+        //  1. Detect live slot from Service selector
+        //  2. Apply prod YAML with updated image (both slots get new image)
+        //  3. Health check the INACTIVE slot
+        //  4. PASS  → patch Service selector → cutover
+        //             scale old slot to 1 (hot standby)
+        //  5. FAIL  → rollback inactive slot, live slot untouched
         stage('Blue-Green Deploy to Prod') {
             when {
                 expression { return params.RUN_DEPLOYMENT == true }
@@ -889,126 +768,102 @@ PYEOF
                     echo " BLUE-GREEN DEPLOY: ${SERVICE} v${VERSION} → PROD"
                     echo "══════════════════════════════════════════════════"
 
-                    // ── Step 1: Detect current live slot ──────────────
+                    // Step 1: Detect live slot
                     def liveSlot = sh(
-                        script: """kubectl get service ${SERVICE} -n prod \
+                        script: """kubectl get service attendance -n prod \
                             -o jsonpath='{.spec.selector.slot}' 2>/dev/null || echo 'blue'""",
                         returnStdout: true
                     ).trim()
                     if (!liveSlot) { liveSlot = 'blue' }
-
                     def newSlot = (liveSlot == 'blue') ? 'green' : 'blue'
+
                     echo "Current LIVE slot : ${liveSlot}"
                     echo "Deploying to slot : ${newSlot}"
-
-                    // Persist for rollback reference in notifications
                     env.LIVE_SLOT = liveSlot
                     env.NEW_SLOT  = newSlot
 
-                    // ── Step 2: Deploy to the inactive slot ───────────
+                    // Step 2: Apply prod YAML with updated image
                     sh """
-                        echo "--- Updating ${newSlot} deployment in prod ---"
+                        echo "--- Applying prod manifests with image: ${env.DOCKER_IMAGE_RESOLVED} ---"
+                        sed "s|image: attendance:.*|image: ${env.DOCKER_IMAGE_RESOLVED}|g" \
+                            ${K8S_PROD} | kubectl apply -f -
 
-                        kubectl set image deployment/${SERVICE}-${newSlot} \
-                            ${SERVICE}=${params.DOCKER_IMAGE} \
-                            -n prod \
-                            --record
-
-                        kubectl rollout status deployment/${SERVICE}-${newSlot} \
-                            -n prod \
-                            --timeout=300s
-
-                        echo "${newSlot} slot rollout complete ✅"
+                        echo "--- Waiting for ${newSlot} slot rollout ---"
+                        kubectl rollout status deployment/attendance-${newSlot} \
+                            -n prod --timeout=300s
+                        echo "${newSlot} slot ready ✅"
                     """
 
-                    // ── Step 3: Health-check the NEW (inactive) slot ──
-                    echo "--- Health-checking ${newSlot} slot (pre-cutover) ---"
+                    // Step 3: Health check inactive (new) slot
                     def newPod = sh(
                         script: """kubectl get pods -n prod \
-                            -l app=${SERVICE},slot=${newSlot} \
+                            -l app=attendance,slot=${newSlot} \
                             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo ''""",
                         returnStdout: true
                     ).trim()
 
                     if (!newPod) {
-                        // No pod at all in new slot — abort without touching live traffic
                         sh """
-                            kubectl rollout undo deployment/${SERVICE}-${newSlot} -n prod || true
+                            kubectl rollout undo deployment/attendance-${newSlot} -n prod || true
                         """
                         def notifier = new NotificationManager(this)
                         def details  = getBuildDetails(this)
                         details.changes = details.changes +
-                            " | PROD Blue-Green ABORTED — no pod in ${newSlot} (${liveSlot} still live) ❌"
+                            " | PROD ABORTED — no pod in ${newSlot} (${liveSlot} still live) ❌"
                         notifier.notifyAll('FAILURE', details)
-                        error("Blue-Green aborted: no pod found in ${newSlot} slot. ${liveSlot} continues serving traffic ✅")
+                        error("Blue-Green aborted: no pod in ${newSlot}. ${liveSlot} still serving ✅")
                     }
 
                     def bgHealthy = false
                     for (int i = 1; i <= env.HEALTH_CHECK_RETRIES.toInteger(); i++) {
-                        def httpStatus = sh(
+                        def status = sh(
                             script: """kubectl exec -n prod ${newPod} \
                                 -- curl -s -o /dev/null -w "%{http_code}" \
                                 http://localhost:${env.HEALTH_PORT}/${SERVICE}/healthz \
                                 2>/dev/null || echo '000'""",
                             returnStdout: true
                         ).trim()
-                        echo "Prod ${newSlot} health attempt ${i}/${env.HEALTH_CHECK_RETRIES}: HTTP ${httpStatus}"
-                        if (httpStatus == '200') { bgHealthy = true; break }
+                        echo "Prod ${newSlot} health attempt ${i}/${env.HEALTH_CHECK_RETRIES}: HTTP ${status}"
+                        if (status == '200') { bgHealthy = true; break }
                         sleep(env.HEALTH_CHECK_INTERVAL.toInteger())
                     }
 
                     if (!bgHealthy) {
-                        // ── AUTOMATIC ROLLBACK (Blue-Green) ───────────
-                        // New slot is unhealthy → service selector is NEVER changed.
-                        // Live slot keeps 100% of traffic with zero downtime.
-                        // New slot is scaled to 0 and image rolled back.
-                        echo "══════════════════════════════════════════════════════"
-                        echo " ❌ NEW SLOT UNHEALTHY — AUTOMATIC ROLLBACK"
-                        echo " Service selector NOT changed — ${liveSlot} still live ✅"
-                        echo "══════════════════════════════════════════════════════"
-
+                        // Step 5: FAIL — rollback new slot, live slot untouched
+                        echo "❌ NEW SLOT UNHEALTHY — ROLLING BACK"
+                        echo "   Service selector NOT changed — ${liveSlot} still live ✅"
                         sh """
-                            echo "Scaling down failed ${newSlot} slot to 0 replicas"
-                            kubectl scale deployment/${SERVICE}-${newSlot} --replicas=0 -n prod
-
-                            echo "Rolling back ${newSlot} image to previous version"
-                            kubectl rollout undo deployment/${SERVICE}-${newSlot} -n prod
+                            kubectl scale deployment/attendance-${newSlot} --replicas=0 -n prod
+                            kubectl rollout undo deployment/attendance-${newSlot} -n prod
                         """
-
                         def notifier = new NotificationManager(this)
                         def details  = getBuildDetails(this)
                         details.changes = details.changes +
-                            " | PROD Blue-Green ROLLED BACK — ${liveSlot} still live ❌"
+                            " | PROD ROLLED BACK — ${liveSlot} still live ❌"
                         notifier.notifyAll('FAILURE', details)
-
-                        error("Prod Blue-Green failed: ${newSlot} unhealthy. ${liveSlot} continues serving traffic ✅")
+                        error("Prod Blue-Green failed: ${newSlot} unhealthy. ${liveSlot} still live ✅")
                     }
 
-                    // ── Step 4: CUTOVER — switch Service selector ─────
-                    echo "--- All checks passed — cutting over to ${newSlot} ---"
+                    // Step 4: PASS — cutover traffic to new slot
                     sh """
-                        kubectl patch service ${SERVICE} -n prod \
+                        kubectl patch service attendance -n prod \
                             -p '{"spec":{"selector":{"slot":"${newSlot}"}}}'
+                        echo "Traffic switched → ${newSlot} (100%) ✅"
 
-                        echo "Service selector → ${newSlot} | 100% traffic now on ${newSlot} ✅"
-                    """
-
-                    // ── Step 5: Scale down OLD slot (keep 1 for instant manual rollback) ──
-                    sh """
-                        echo "Scaling ${liveSlot} slot to 1 replica (hot standby for manual rollback)"
-                        kubectl scale deployment/${SERVICE}-${liveSlot} --replicas=1 -n prod
+                        # Keep old slot at 1 replica as hot standby
+                        kubectl scale deployment/attendance-${liveSlot} --replicas=1 -n prod
+                        echo "${liveSlot} scaled to 1 (hot standby for instant rollback)"
                     """
 
                     echo "══════════════════════════════════════════════════"
                     echo " ✅ Blue-Green cutover complete!"
                     echo "    LIVE    : ${newSlot} (100% traffic)"
-                    echo "    STANDBY : ${liveSlot} (1 replica, ready for instant rollback)"
+                    echo "    STANDBY : ${liveSlot} (1 replica)"
                     echo "══════════════════════════════════════════════════"
 
                     def notifier = new NotificationManager(this)
                     def details  = getBuildDetails(this)
-                    details.changes = details.changes +
-                        " | PROD Blue-Green SUCCESS — ${newSlot} live ✅"
+                    details.changes = details.changes + " | PROD Blue-Green SUCCESS — ${newSlot} live ✅"
                     notifier.notifyAll('SUCCESS', details)
                 }
             }
@@ -1017,10 +872,9 @@ PYEOF
     } // end stages
 
     // ═══════════════════════════════════════════════════════════
-    //  POST BLOCKS  (unchanged from previous version)
+    //  POST BLOCKS
     // ═══════════════════════════════════════════════════════════
     post {
-
         always {
             script {
                 echo "Pipeline finished — Status: ${currentBuild.currentResult}"
@@ -1028,27 +882,24 @@ PYEOF
             archiveArtifacts artifacts: "${REPORT_DIR}/**",
                              allowEmptyArchive: true
         }
-
         success {
             script {
                 def notifier = new NotificationManager(this)
                 def details  = getBuildDetails(this)
-                details.changes = details.changes + " | ALL TESTS PASSED ✅"
+                details.changes = details.changes + " | ALL PASSED ✅"
                 notifier.notifyAll('SUCCESS', details)
                 uploadPdfToSlack("✅ Test Report: ${SERVICE} v${VERSION} — ALL TESTS PASSED")
             }
         }
-
         failure {
             script {
                 def notifier = new NotificationManager(this)
                 def details  = getBuildDetails(this)
-                details.changes = details.changes + " | TESTS FAILED ❌"
+                details.changes = details.changes + " | FAILED ❌"
                 notifier.notifyAll('FAILURE', details)
                 uploadPdfToSlack("❌ Test Report: ${SERVICE} v${VERSION} — FAILED")
             }
         }
-
         unstable {
             script {
                 def notifier = new NotificationManager(this)
@@ -1058,7 +909,6 @@ PYEOF
                 uploadPdfToSlack("⚠️ Test Report: ${SERVICE} v${VERSION} — UNSTABLE")
             }
         }
-
         cleanup {
             cleanWs()
         }
@@ -1066,7 +916,7 @@ PYEOF
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  HELPER — Upload PDF to Slack via curl  (unchanged)
+//  HELPER — Upload PDF to Slack
 // ═══════════════════════════════════════════════════════════════
 def uploadPdfToSlack(String comment) {
     try {
@@ -1096,7 +946,7 @@ print('PDF uploaded to Slack ✅' if r.get('ok') else f'Warning: {r.get(\\\"erro
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  HELPER — Build Details Map  (unchanged)
+//  HELPER — Build Details Map
 // ═══════════════════════════════════════════════════════════════
 def getBuildDetails(def ctx) {
     String changes = 'No changes'
@@ -1109,9 +959,7 @@ def getBuildDetails(def ctx) {
         changes = 'Could not fetch changes'
     }
 
-    String buildUrl = ctx.env.BUILD_URL
-        ?: "${ctx.env.JENKINS_URL ?: 'http://localhost:8080'}job/${ctx.env.JOB_NAME}/${ctx.env.BUILD_NUMBER}/"
-
+    String buildUrl    = ctx.env.BUILD_URL ?: "${ctx.env.JENKINS_URL ?: 'http://localhost:8080'}job/${ctx.env.JOB_NAME}/${ctx.env.BUILD_NUMBER}/"
     String testsUrl    = "${buildUrl}testReport/"
     String coverageUrl = "${buildUrl}coverage/"
     String pdfUrl      = "${buildUrl}artifact/test-reports/test-report.pdf"
