@@ -3,9 +3,11 @@
 import org.example.NotificationManager
 
 // ═══════════════════════════════════════════════════════════════
-//  COMPLETE TESTING PIPELINE — PRODUCTION READY
+//  COMPLETE TESTING + MULTI-ENV DEPLOYMENT PIPELINE
 //  Unit → Coverage → Parallel(Integration + Lint) → E2E
-//  Reports: JUnit + Coverage + PDF → Slack + Email (with Quick Links)
+//  → Deploy Dev (auto) → Approval → Deploy Staging
+//  → Approval → Blue-Green Prod → Health Check → Rollback
+//  Reports: JUnit + Coverage + PDF → Slack + Email (Quick Links)
 // ═══════════════════════════════════════════════════════════════
 
 pipeline {
@@ -42,6 +44,27 @@ pipeline {
             defaultValue: true,
             description: 'Fail build if coverage below threshold?'
         )
+        // ── Assignment-5: new deployment parameters ─────────────
+        booleanParam(
+            name: 'RUN_DEPLOYMENT',
+            defaultValue: false,
+            description: 'Run deployment stages after tests? (Dev auto → Staging approval → Prod Blue-Green)'
+        )
+        string(
+            name: 'DOCKER_IMAGE',
+            defaultValue: 'your-registry/SERVICE:VERSION',
+            description: 'Full Docker image to deploy (e.g. registry.example.com/attendance:1.0.0)'
+        )
+        string(
+            name: 'STAGING_APPROVAL_TIMEOUT',
+            defaultValue: '30',
+            description: 'Minutes to wait for Staging manual approval before aborting'
+        )
+        string(
+            name: 'PROD_APPROVAL_TIMEOUT',
+            defaultValue: '30',
+            description: 'Minutes to wait for Prod Blue-Green manual approval before aborting'
+        )
     }
 
     environment {
@@ -55,6 +78,10 @@ pipeline {
         KUBECONFIG    = '/var/lib/jenkins/.kube/config'
         SLACK_CHANNEL = '#jenkins-notifications'
         SLACK_CRED_ID = 'slackaditya'
+        // ── Assignment-5: deployment env vars ───────────────────
+        HEALTH_CHECK_RETRIES  = '10'
+        HEALTH_CHECK_INTERVAL = '10'
+        HEALTH_PORT           = '8081'
     }
 
     stages {
@@ -588,10 +615,409 @@ PYEOF
             }
         }
 
+        // ════════════════════════════════════════════════════════
+        //  ASSIGNMENT-5: MULTI-ENVIRONMENT DEPLOYMENT STAGES
+        //  Stages 8-12 are purely additive. Nothing above is touched.
+        //  All stages are gated by RUN_DEPLOYMENT=true so the
+        //  testing-only workflow is completely unaffected.
+        // ════════════════════════════════════════════════════════
+
+        // ── STAGE 8: DEPLOY TO DEV (Automatic) ─────────────────
+        // Dev deploys automatically — no manual approval needed.
+        // milestone(1) cancels any older queued build waiting here
+        // so only the latest commit ever reaches Dev first.
+        stage('Deploy to Dev') {
+            when {
+                expression { return params.RUN_DEPLOYMENT == true }
+            }
+            steps {
+                script {
+                    // Milestone 1 — concurrency control
+                    milestone(1)
+
+                    echo "═══════════════════════════════════════"
+                    echo " DEPLOYING ${SERVICE} v${VERSION} → DEV"
+                    echo "═══════════════════════════════════════"
+
+                    def notifier = new NotificationManager(this)
+                    def details  = getBuildDetails(this)
+                    details.changes = details.changes + " | Deploying to DEV 🚀"
+                    notifier.notifyAll('STARTED', details)
+                }
+                sh """
+                    echo "--- Applying Kubernetes manifests to dev namespace ---"
+
+                    # Update container image in the existing deployment
+                    kubectl set image deployment/${SERVICE} \
+                        ${SERVICE}=${params.DOCKER_IMAGE} \
+                        -n dev \
+                        --record
+
+                    # Wait for all pods to roll over (timeout: 3 min)
+                    kubectl rollout status deployment/${SERVICE} \
+                        -n dev \
+                        --timeout=180s
+
+                    echo "Dev rollout complete ✅"
+                """
+                script {
+                    // ── Health check via httpRequest (kubectl exec + curl) ──
+                    // Uses the same pattern as E2E stage for consistency
+                    echo "--- Health-checking dev after deploy ---"
+                    def devPod = sh(
+                        script: """kubectl get pods -n dev \
+                            -l app=${SERVICE} \
+                            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo ''""",
+                        returnStdout: true
+                    ).trim()
+
+                    if (!devPod) {
+                        error("Health check failed: no pod found in dev after deployment")
+                    }
+
+                    def devHealthy = false
+                    for (int i = 1; i <= env.HEALTH_CHECK_RETRIES.toInteger(); i++) {
+                        def httpStatus = sh(
+                            script: """kubectl exec -n dev ${devPod} \
+                                -- curl -s -o /dev/null -w "%{http_code}" \
+                                http://localhost:${env.HEALTH_PORT}/${SERVICE}/healthz \
+                                2>/dev/null || echo '000'""",
+                            returnStdout: true
+                        ).trim()
+                        echo "Dev health attempt ${i}/${env.HEALTH_CHECK_RETRIES}: HTTP ${httpStatus}"
+                        if (httpStatus == '200') { devHealthy = true; break }
+                        sleep(env.HEALTH_CHECK_INTERVAL.toInteger())
+                    }
+
+                    if (!devHealthy) {
+                        // ── Automatic rollback on health failure ──
+                        echo "Dev health check failed — rolling back automatically ⚠️"
+                        sh """
+                            kubectl rollout undo deployment/${SERVICE} -n dev
+                            kubectl rollout status deployment/${SERVICE} -n dev --timeout=120s
+                        """
+                        def notifier = new NotificationManager(this)
+                        def details  = getBuildDetails(this)
+                        details.changes = details.changes + " | Dev ROLLED BACK ❌"
+                        notifier.notifyAll('FAILURE', details)
+                        error("Dev deployment rolled back — health check failed ❌")
+                    }
+
+                    echo "Dev health check passed ✅"
+                    def notifier = new NotificationManager(this)
+                    def details  = getBuildDetails(this)
+                    details.changes = details.changes + " | Dev deploy SUCCESS ✅"
+                    notifier.notifyAll('SUCCESS', details)
+                }
+            }
+        }
+
+        // ── STAGE 9: APPROVAL FOR STAGING ──────────────────────
+        // Manual gate before promoting to Staging.
+        // Notifies team on Slack + Email with build URL so approver
+        // can review Dev logs before clicking Approve.
+        stage('Approval: Deploy to Staging') {
+            when {
+                expression { return params.RUN_DEPLOYMENT == true }
+            }
+            steps {
+                script {
+                    // Milestone 2 — if two builds reach this gate,
+                    // the older one is automatically aborted
+                    milestone(2)
+
+                    def notifier = new NotificationManager(this)
+                    def details  = getBuildDetails(this)
+                    details.changes = details.changes + " | Waiting for STAGING approval ⏳"
+                    notifier.notifyAll('UNSTABLE', details)
+
+                    echo "═══════════════════════════════════════════════════════"
+                    echo " Waiting for manual approval → STAGING"
+                    echo " Timeout: ${params.STAGING_APPROVAL_TIMEOUT} minutes"
+                    echo "═══════════════════════════════════════════════════════"
+                }
+                timeout(time: params.STAGING_APPROVAL_TIMEOUT.toInteger(), unit: 'MINUTES') {
+                    input(
+                        message: "Deploy ${params.SERVICE} v${params.VERSION} to STAGING?",
+                        ok: 'Yes, Deploy to Staging',
+                        submitter: 'admin,devops-team',
+                        submitterParameter: 'STAGING_APPROVER'
+                    )
+                }
+                script {
+                    echo "Staging approved ✅  Approver: ${env.STAGING_APPROVER ?: 'unknown'}"
+                }
+            }
+        }
+
+        // ── STAGE 10: DEPLOY TO STAGING ─────────────────────────
+        // Standard rolling deploy to staging with health check
+        // and automatic rollback on failure.
+        stage('Deploy to Staging') {
+            when {
+                expression { return params.RUN_DEPLOYMENT == true }
+            }
+            steps {
+                script {
+                    echo "════════════════════════════════════════════"
+                    echo " DEPLOYING ${SERVICE} v${VERSION} → STAGING"
+                    echo "════════════════════════════════════════════"
+
+                    def notifier = new NotificationManager(this)
+                    def details  = getBuildDetails(this)
+                    details.changes = details.changes + " | Deploying to STAGING 🚀"
+                    notifier.notifyAll('STARTED', details)
+                }
+                sh """
+                    echo "--- Applying manifests to staging namespace ---"
+
+                    kubectl set image deployment/${SERVICE} \
+                        ${SERVICE}=${params.DOCKER_IMAGE} \
+                        -n staging \
+                        --record
+
+                    kubectl rollout status deployment/${SERVICE} \
+                        -n staging \
+                        --timeout=180s
+
+                    echo "Staging rollout complete ✅"
+                """
+                script {
+                    echo "--- Health-checking staging after deploy ---"
+                    def stagingPod = sh(
+                        script: """kubectl get pods -n staging \
+                            -l app=${SERVICE} \
+                            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo ''""",
+                        returnStdout: true
+                    ).trim()
+
+                    if (!stagingPod) {
+                        error("Health check failed: no pod found in staging after deployment")
+                    }
+
+                    def stagingHealthy = false
+                    for (int i = 1; i <= env.HEALTH_CHECK_RETRIES.toInteger(); i++) {
+                        def httpStatus = sh(
+                            script: """kubectl exec -n staging ${stagingPod} \
+                                -- curl -s -o /dev/null -w "%{http_code}" \
+                                http://localhost:${env.HEALTH_PORT}/${SERVICE}/healthz \
+                                2>/dev/null || echo '000'""",
+                            returnStdout: true
+                        ).trim()
+                        echo "Staging health attempt ${i}/${env.HEALTH_CHECK_RETRIES}: HTTP ${httpStatus}"
+                        if (httpStatus == '200') { stagingHealthy = true; break }
+                        sleep(env.HEALTH_CHECK_INTERVAL.toInteger())
+                    }
+
+                    if (!stagingHealthy) {
+                        echo "Staging health check failed — rolling back automatically ⚠️"
+                        sh """
+                            kubectl rollout undo deployment/${SERVICE} -n staging
+                            kubectl rollout status deployment/${SERVICE} -n staging --timeout=120s
+                        """
+                        def notifier = new NotificationManager(this)
+                        def details  = getBuildDetails(this)
+                        details.changes = details.changes + " | Staging ROLLED BACK ❌"
+                        notifier.notifyAll('FAILURE', details)
+                        error("Staging deployment rolled back — health check failed ❌")
+                    }
+
+                    echo "Staging health check passed ✅"
+                    def notifier = new NotificationManager(this)
+                    def details  = getBuildDetails(this)
+                    details.changes = details.changes + " | Staging deploy SUCCESS ✅"
+                    notifier.notifyAll('SUCCESS', details)
+                }
+            }
+        }
+
+        // ── STAGE 11: APPROVAL FOR PRODUCTION ──────────────────
+        // Second human gate — only reached after staging health check passes.
+        // Uses a separate timeout parameter from staging.
+        stage('Approval: Blue-Green Deploy to Prod') {
+            when {
+                expression { return params.RUN_DEPLOYMENT == true }
+            }
+            steps {
+                script {
+                    // Milestone 3 — only ONE build may proceed to prod at a time;
+                    // the older queued build is aborted automatically
+                    milestone(3)
+
+                    def notifier = new NotificationManager(this)
+                    def details  = getBuildDetails(this)
+                    details.changes = details.changes + " | Waiting for PROD Blue-Green approval ⏳"
+                    notifier.notifyAll('UNSTABLE', details)
+
+                    echo "══════════════════════════════════════════════════════"
+                    echo " Waiting for manual approval → PROD Blue-Green"
+                    echo " Timeout: ${params.PROD_APPROVAL_TIMEOUT} minutes"
+                    echo "══════════════════════════════════════════════════════"
+                }
+                timeout(time: params.PROD_APPROVAL_TIMEOUT.toInteger(), unit: 'MINUTES') {
+                    input(
+                        message: "Blue-Green deploy ${params.SERVICE} v${params.VERSION} to PRODUCTION?",
+                        ok: 'Yes, Go Live on Production',
+                        submitter: 'admin,devops-lead',
+                        submitterParameter: 'PROD_APPROVER'
+                    )
+                }
+                script {
+                    echo "Production approved ✅  Approver: ${env.PROD_APPROVER ?: 'unknown'}"
+                }
+            }
+        }
+
+        // ── STAGE 12: BLUE-GREEN DEPLOY TO PROD ────────────────
+        //
+        // Strategy:
+        //  1. Detect which slot (blue/green) is currently live via Service selector
+        //  2. Deploy the new image to the INACTIVE slot
+        //  3. Health-check the inactive slot (10 retries × 10s)
+        //  4. PASS  → patch Service selector → traffic switches to new slot (cutover)
+        //             old slot scaled to 1 replica (fast manual rollback reserve)
+        //  5. FAIL  → do NOT touch Service selector; new slot scaled to 0 and
+        //             rolled back via kubectl rollout undo (zero downtime rollback)
+        //
+        stage('Blue-Green Deploy to Prod') {
+            when {
+                expression { return params.RUN_DEPLOYMENT == true }
+            }
+            steps {
+                script {
+                    echo "══════════════════════════════════════════════════"
+                    echo " BLUE-GREEN DEPLOY: ${SERVICE} v${VERSION} → PROD"
+                    echo "══════════════════════════════════════════════════"
+
+                    // ── Step 1: Detect current live slot ──────────────
+                    def liveSlot = sh(
+                        script: """kubectl get service ${SERVICE} -n prod \
+                            -o jsonpath='{.spec.selector.slot}' 2>/dev/null || echo 'blue'""",
+                        returnStdout: true
+                    ).trim()
+                    if (!liveSlot) { liveSlot = 'blue' }
+
+                    def newSlot = (liveSlot == 'blue') ? 'green' : 'blue'
+                    echo "Current LIVE slot : ${liveSlot}"
+                    echo "Deploying to slot : ${newSlot}"
+
+                    // Persist for rollback reference in notifications
+                    env.LIVE_SLOT = liveSlot
+                    env.NEW_SLOT  = newSlot
+
+                    // ── Step 2: Deploy to the inactive slot ───────────
+                    sh """
+                        echo "--- Updating ${newSlot} deployment in prod ---"
+
+                        kubectl set image deployment/${SERVICE}-${newSlot} \
+                            ${SERVICE}=${params.DOCKER_IMAGE} \
+                            -n prod \
+                            --record
+
+                        kubectl rollout status deployment/${SERVICE}-${newSlot} \
+                            -n prod \
+                            --timeout=300s
+
+                        echo "${newSlot} slot rollout complete ✅"
+                    """
+
+                    // ── Step 3: Health-check the NEW (inactive) slot ──
+                    echo "--- Health-checking ${newSlot} slot (pre-cutover) ---"
+                    def newPod = sh(
+                        script: """kubectl get pods -n prod \
+                            -l app=${SERVICE},slot=${newSlot} \
+                            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo ''""",
+                        returnStdout: true
+                    ).trim()
+
+                    if (!newPod) {
+                        // No pod at all in new slot — abort without touching live traffic
+                        sh """
+                            kubectl rollout undo deployment/${SERVICE}-${newSlot} -n prod || true
+                        """
+                        def notifier = new NotificationManager(this)
+                        def details  = getBuildDetails(this)
+                        details.changes = details.changes +
+                            " | PROD Blue-Green ABORTED — no pod in ${newSlot} (${liveSlot} still live) ❌"
+                        notifier.notifyAll('FAILURE', details)
+                        error("Blue-Green aborted: no pod found in ${newSlot} slot. ${liveSlot} continues serving traffic ✅")
+                    }
+
+                    def bgHealthy = false
+                    for (int i = 1; i <= env.HEALTH_CHECK_RETRIES.toInteger(); i++) {
+                        def httpStatus = sh(
+                            script: """kubectl exec -n prod ${newPod} \
+                                -- curl -s -o /dev/null -w "%{http_code}" \
+                                http://localhost:${env.HEALTH_PORT}/${SERVICE}/healthz \
+                                2>/dev/null || echo '000'""",
+                            returnStdout: true
+                        ).trim()
+                        echo "Prod ${newSlot} health attempt ${i}/${env.HEALTH_CHECK_RETRIES}: HTTP ${httpStatus}"
+                        if (httpStatus == '200') { bgHealthy = true; break }
+                        sleep(env.HEALTH_CHECK_INTERVAL.toInteger())
+                    }
+
+                    if (!bgHealthy) {
+                        // ── AUTOMATIC ROLLBACK (Blue-Green) ───────────
+                        // New slot is unhealthy → service selector is NEVER changed.
+                        // Live slot keeps 100% of traffic with zero downtime.
+                        // New slot is scaled to 0 and image rolled back.
+                        echo "══════════════════════════════════════════════════════"
+                        echo " ❌ NEW SLOT UNHEALTHY — AUTOMATIC ROLLBACK"
+                        echo " Service selector NOT changed — ${liveSlot} still live ✅"
+                        echo "══════════════════════════════════════════════════════"
+
+                        sh """
+                            echo "Scaling down failed ${newSlot} slot to 0 replicas"
+                            kubectl scale deployment/${SERVICE}-${newSlot} --replicas=0 -n prod
+
+                            echo "Rolling back ${newSlot} image to previous version"
+                            kubectl rollout undo deployment/${SERVICE}-${newSlot} -n prod
+                        """
+
+                        def notifier = new NotificationManager(this)
+                        def details  = getBuildDetails(this)
+                        details.changes = details.changes +
+                            " | PROD Blue-Green ROLLED BACK — ${liveSlot} still live ❌"
+                        notifier.notifyAll('FAILURE', details)
+
+                        error("Prod Blue-Green failed: ${newSlot} unhealthy. ${liveSlot} continues serving traffic ✅")
+                    }
+
+                    // ── Step 4: CUTOVER — switch Service selector ─────
+                    echo "--- All checks passed — cutting over to ${newSlot} ---"
+                    sh """
+                        kubectl patch service ${SERVICE} -n prod \
+                            -p '{"spec":{"selector":{"slot":"${newSlot}"}}}'
+
+                        echo "Service selector → ${newSlot} | 100% traffic now on ${newSlot} ✅"
+                    """
+
+                    // ── Step 5: Scale down OLD slot (keep 1 for instant manual rollback) ──
+                    sh """
+                        echo "Scaling ${liveSlot} slot to 1 replica (hot standby for manual rollback)"
+                        kubectl scale deployment/${SERVICE}-${liveSlot} --replicas=1 -n prod
+                    """
+
+                    echo "══════════════════════════════════════════════════"
+                    echo " ✅ Blue-Green cutover complete!"
+                    echo "    LIVE    : ${newSlot} (100% traffic)"
+                    echo "    STANDBY : ${liveSlot} (1 replica, ready for instant rollback)"
+                    echo "══════════════════════════════════════════════════"
+
+                    def notifier = new NotificationManager(this)
+                    def details  = getBuildDetails(this)
+                    details.changes = details.changes +
+                        " | PROD Blue-Green SUCCESS — ${newSlot} live ✅"
+                    notifier.notifyAll('SUCCESS', details)
+                }
+            }
+        }
+
     } // end stages
 
     // ═══════════════════════════════════════════════════════════
-    //  POST BLOCKS
+    //  POST BLOCKS  (unchanged from previous version)
     // ═══════════════════════════════════════════════════════════
     post {
 
@@ -640,7 +1066,7 @@ PYEOF
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  HELPER — Upload PDF to Slack via curl
+//  HELPER — Upload PDF to Slack via curl  (unchanged)
 // ═══════════════════════════════════════════════════════════════
 def uploadPdfToSlack(String comment) {
     try {
@@ -670,7 +1096,7 @@ print('PDF uploaded to Slack ✅' if r.get('ok') else f'Warning: {r.get(\\\"erro
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  HELPER — Build Details Map (with all Quick Link URLs)
+//  HELPER — Build Details Map  (unchanged)
 // ═══════════════════════════════════════════════════════════════
 def getBuildDetails(def ctx) {
     String changes = 'No changes'
@@ -683,7 +1109,6 @@ def getBuildDetails(def ctx) {
         changes = 'Could not fetch changes'
     }
 
-    // Prefer BUILD_URL; fall back to JENKINS_URL + path so links are never localhost
     String buildUrl = ctx.env.BUILD_URL
         ?: "${ctx.env.JENKINS_URL ?: 'http://localhost:8080'}job/${ctx.env.JOB_NAME}/${ctx.env.BUILD_NUMBER}/"
 
